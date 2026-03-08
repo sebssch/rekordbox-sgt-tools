@@ -1,0 +1,46 @@
+# ╔══════════════════════════════════════════════════════════════╗
+# ║  Rekordbox AutoCue v26 — Python Dependencies               ║
+# ╚══════════════════════════════════════════════════════════════╝
+#
+# System-Anforderungen:
+#   - macOS 13+ (Apple Silicon oder Intel)
+#   - Python 3.12+ (empfohlen: 3.14, wie im Projekt)
+#   - Rekordbox 6.x oder 7.x (muss installiert sein)
+#   - Mixed In Key 11 (optional, fuer MIK-Cue-Integration)
+#
+# Installation:
+#   python3 -m venv .venv
+#   source .venv/bin/activate
+#   pip install -r requirements.txt
+#
+# ──────────────────────────────────────────────────────────────
+
+# --- Core: Rekordbox DB-Zugriff ---
+pyrekordbox>=0.4.4        # Rekordbox master.db lesen/schreiben
+SQLAlchemy>=2.0           # ORM-Layer fuer pyrekordbox
+construct>=2.10           # Binaer-Parsing (ANLZ Beatgrid-Format)
+bidict>=0.23              # Bidirektionale Mappings (pyrekordbox intern)
+
+# --- Audio-Analyse ---
+librosa>=0.11             # Audio-Segmentierung, Novelty, SSM
+numpy>=1.24               # Array-Operationen
+scipy>=1.10               # Signal-Verarbeitung
+numba>=0.57               # JIT-Beschleunigung fuer librosa
+soundfile>=0.12           # Audio-Datei-I/O
+
+# --- Machine Learning ---
+scikit-learn>=1.3         # CBR Cosine-Similarity, k-NN
+
+# --- MIK-Integration (ID3-Tags) ---
+# mutagen                 # Optional: ID3-TXXX-Frame-Parsing fuer MIK
+#                         # pip install mutagen  (nicht standardmaessig eingebaut)
+
+# --- Terminal UI ---
+rich>=14.0                # Farbige Ausgabe, Progress-Bars, Panels
+
+# --- Konfiguration ---
+PyYAML>=6.0               # config.yaml parsen
+
+# --- Diverse ---
+tqdm>=4.60                # Legacy-Fortschrittsbalken (rueckwaertskompatibel)
+pooch>=1.6                # Daten-Download-Caching (librosa-Abhaengigkeit)

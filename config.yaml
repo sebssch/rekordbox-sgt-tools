@@ -1,0 +1,55 @@
+# ╔══════════════════════════════════════════════════════════════╗
+# ║  Rekordbox AutoCue v26.1 — Konfiguration                    ║
+# ║  Alle Parameter zentral hier konfigurieren.                  ║
+# ╚══════════════════════════════════════════════════════════════╝
+
+# --- Version ---
+version: "26.1"
+
+# --- Cue-Beschriftung ---
+# Prefix der vor jedem Cue-Kommentar in Rekordbox erscheint.
+# Wird auch zur Identifikation eigener Cues genutzt (wird geprüft via startswith).
+# Empfehlung: kurzes Kürzel wie "A:", "DJ:", "AC:" etc.
+cue_prefix: "A:"
+
+# --- Hot Cue Constraints ---
+min_hot_a_b_distance_beats: 128   # Mindestabstand Hot A ↔ Hot B (32 Bars @ 4/4)
+hot_b_offset_beats: 32            # Standard: Hot B liegt N Beats vor Hot C
+
+# --- Memory Cues ---
+max_memory_cues: 10               # Maximale Anzahl Memory Cues pro Track
+memory_min_hot_distance_beats: 32 # Memory Cues müssen mind. N Beats von jedem Hot Cue UND untereinander entfernt sein
+
+# --- MIK Integration (Mixed In Key) ---
+mik_snap_tolerance_beats: 4       # Hot B snappt auf MIK-Cue wenn innerhalb ±N Beats
+
+# --- Triple-Check Validator (v26.1) ---
+# MIK × Phrase Konsens-Toleranz: Wie viele Beats dürfen MIK-Cue und Phrase-Start auseinanderliegen?
+phrase_match_tolerance_beats: 2
+# Automatische Korrektur-Schwelle: Gelernte Offsets werden angewendet wenn Konfidenz > N%
+auto_correction_confidence_threshold: 0.80
+
+# --- Cue Farben (Rekordbox Farbcodes, -1 = Standard/keine Farbe) ---
+# Bekannte Rekordbox Farbcodes: -1 (keine), 122 (rot), 63 (orange), 114 (gelb),
+#                                39 (grün), 9 (türkis), 5 (blau), 17 (lila)
+colors:
+  hot_a: -1         # Hot Cue A "The Break"
+  hot_b: -1         # Hot Cue B "The Setup"
+  hot_c: -1         # Hot Cue C "The Last Drop"
+  memory: -1        # Memory Cues
+
+# --- Playlist ---
+# Name der Rekordbox-Playlist, die verarbeitet werden soll.
+analyse_playlist: "--analyse-tracks"
+
+# --- Pfade (leer lassen für automatische Erkennung) ---
+# Bei leerem String werden die macOS-Standardpfade verwendet.
+rekordbox_db_path: ""             # z.B. "~/Library/Pioneer/rekordbox/master.db"
+mik_db_path: ""                   # z.B. "~/Library/Application Support/MixedInKey/Collection11.mikdb"
+
+# --- Learning ---
+min_corrections: 3                # Mindest-Korrekturen bevor Parameter angepasst wird
+
+# --- Logging ---
+log_file: "app.log"               # Logdatei (relativ zum Projektverzeichnis, "" = kein File-Log)
+log_level: "INFO"                 # DEBUG, INFO, WARNING, ERROR

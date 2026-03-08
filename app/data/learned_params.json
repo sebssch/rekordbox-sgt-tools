@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "updated_at": "2026-03-04T13:00:44",
+  "n_corrections_used": 717,
+  "cue_spacing_threshold": 48,
+  "hot_b_offset_beats": 16,
+  "hot_a_time_offset_ms": -12451,
+  "hot_c_time_offset_ms": 28447,
+  "break_energy_threshold": 0.4,
+  "drop_energy_delta": 0.25,
+  "drop_energy_min": 0.6,
+  "confidence_scores": {
+    "hot_a_accuracy": 0.173,
+    "hot_b_accuracy": 0.151,
+    "hot_c_accuracy": 0.151,
+    "memory_accuracy": 0.449,
+    "overall_accuracy": 0.385
+  }
+}

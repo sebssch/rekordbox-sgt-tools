@@ -1,0 +1,866 @@
+"""
+v26 Cue-Logik
+Leitet Cue-Punkte aus der Track-Analyse ab.
+Implementiert die DJ-spezifische Cue-Hierarchie:
+
+  Hot Cue A (1):    "The Break"  — Break Start (Percussion-Abfall nach Intro)
+  Hot Cue B (2):    "The Setup"  — Exakt 32 Beats vor Hot Cue C
+  Hot Cue C (3):    "The Last Drop" — Letzter Drop via Segment + Visual Edge
+
+  Memory Cues:      Max 10, priorisiert:
+                    1. Intro-Struktur (32-Beat-Schritte)
+                    2. Anker (First Drop, Second Break)
+                    3. Phrasen-Uebergaenge
+                    4. Outro-Struktur (KEIN letzter Schlag)
+
+Constraints:
+  - Mindestabstand Hot A ↔ Hot B: 128 Beats (32 Bars) — konfigurierbar
+  - Bei Unterschreitung: CBR-Fallback (Trainings-Tracks analysieren)
+"""
+
+from dataclasses import dataclass
+
+from app.beatgrid import (
+    BeatGrid,
+    snap_to_downbeat,
+    get_time_n_beats_before,
+    get_time_n_beats_after,
+    get_beat_index_at_time,
+    get_time_at_beat,
+)
+from app.segments import TrackAnalysis, Segment
+from app import config as _cfg
+from app.validator import validate_hot_a, validate_hot_c, CueDecision
+from app.phrase_reader import PhraseSegment, get_break_phrases, get_drop_phrases
+
+
+# --- Konstanten (aus config.yaml geladen, Defaults als Fallback) ---
+
+_c = _cfg.load_config()
+MAX_MEMORY_CUES              = _c.get("max_memory_cues",               10)
+MIN_HOT_A_B_DISTANCE_BEATS   = _c.get("min_hot_a_b_distance_beats",    128)
+_MEMORY_MIN_HOT_BEATS        = _c.get("memory_min_hot_distance_beats", 32)
+_MIK_SNAP_TOLERANCE_BEATS    = _c.get("mik_snap_tolerance_beats",      4)
+
+
+# --- Datenmodell ---
+
+@dataclass
+class CuePoint:
+    """Ein Cue-Punkt fuer Rekordbox."""
+    time_sec: float
+    kind: int          # 0=Memory Cue, 1=Hot A, 2=Hot B, 3=Hot C, ...
+    name: str          # z.B. "Memory 1", "Hot A"
+    comment: str       # Beschreibung des Cue-Punkts
+    color: int = -1    # Farbe (-1 = keine)
+    priority: int = 99 # Fuer Memory-Cue-Priorisierung (niedrig = wichtig)
+
+    @property
+    def time_ms(self) -> int:
+        """Zeit in Millisekunden (fuer DjmdCue.InMsec)."""
+        return int(round(self.time_sec * 1000))
+
+    @property
+    def time_frame(self) -> int:
+        """Zeit in Frames (fuer DjmdCue.InFrame, 150 fps)."""
+        return int(round(self.time_sec * 150))
+
+    def __repr__(self) -> str:
+        m = int(self.time_sec // 60)
+        s = self.time_sec % 60
+        kind_str = "Mem" if self.kind == 0 else f"Hot {chr(64 + self.kind)}"
+        return f"CuePoint({m}:{s:05.2f} {kind_str} '{self.comment}')"
+
+
+# --- Segment-Suche ---
+
+def _find_break_start(segments: list[Segment]) -> Segment | None:
+    """
+    Findet den Break Start: Der Moment, in dem die perkussive Energie
+    nach dem Intro/ersten Energie-Plateau abfaellt.
+    = Erster Break NACH dem Intro.
+    """
+    for i, seg in enumerate(segments):
+        if seg.kind == "break" and i > 0:
+            return seg
+    return None
+
+
+def _find_last_drop_visual(analysis: TrackAnalysis) -> float | None:
+    """
+    Findet den letzten Drop.
+    Primaer: Segment-basierte Erkennung (kombiniert SSM + Novelty + Energy + Percussive Ratio).
+    Fallback: Visual Edge Detection (Low/Mid Spektral-Ratio) — nur wenn keine Segmente erkannt.
+    """
+    # Primaer: Segment-basiert (zuverlaessiger als spektrale Ratio)
+    seg_result = _find_last_drop_segment(analysis.segments, analysis.grid)
+    if seg_result is not None:
+        return seg_result
+
+    # Fallback: Visual Edge Detection (falls gar keine Segmente erkannt wurden)
+    if hasattr(analysis, 'visual_edge_last_drop') and analysis.visual_edge_last_drop is not None:
+        return analysis.visual_edge_last_drop
+
+    return None
+
+
+def _find_last_drop_segment(segments: list[Segment],
+                             grid: BeatGrid = None) -> float | None:
+    """
+    Findet den letzten Drop ueber Segment-Klassifizierung.
+    Bevorzugt Drops in der zweiten Trackhälfte.
+    """
+    drops = [s for s in segments if s.kind == "drop"]
+
+    if not drops:
+        # Fallback: energiereichstes Nicht-Intro/Outro-Segment in zweiter Haelfte
+        if grid is not None:
+            mid = float(grid.times[len(grid.times) // 2])
+            candidates = [s for s in segments
+                          if s.kind not in ("intro", "outro")
+                          and s.start_time >= mid
+                          and s.energy_mean > 0.5]
+            if candidates:
+                return max(candidates, key=lambda s: s.energy_mean).start_time
+        # Globaler Fallback (kein Grid verfuegbar)
+        candidates = [s for s in segments
+                      if s.kind not in ("intro", "outro", "break")
+                      and s.energy_mean > 0.6]
+        if candidates:
+            return max(candidates, key=lambda s: s.energy_mean).start_time
+        return None
+
+    # Bevorzuge letzten Drop in der zweiten Trackhälfte
+    if grid is not None and len(grid.times) > 0:
+        mid = float(grid.times[len(grid.times) // 2])
+        second_half = [d for d in drops if d.start_time >= mid]
+        if second_half:
+            return second_half[-1].start_time
+
+    return drops[-1].start_time
+
+
+def _find_first_drop(segments: list[Segment]) -> Segment | None:
+    """Findet den ersten Drop im Track."""
+    for seg in segments:
+        if seg.kind == "drop":
+            return seg
+    return None
+
+
+def _find_second_break(segments: list[Segment]) -> Segment | None:
+    """Findet den zweiten Break (nach dem ersten Drop)."""
+    found_first_break = False
+    for seg in segments:
+        if seg.kind == "break":
+            if found_first_break:
+                return seg
+            found_first_break = True
+    return None
+
+
+def _find_first_high_energy(segments: list[Segment],
+                             min_energy: float = 0.6) -> Segment | None:
+    """Findet das erste Segment mit hoher Energie (kein Intro)."""
+    for i, seg in enumerate(segments):
+        if i > 0 and seg.energy_mean >= min_energy:
+            return seg
+    return None
+
+
+# --- 128-Beat Mindestabstand-Check ---
+
+def _check_min_distance(hot_a_time: float, hot_b_time: float,
+                         grid: BeatGrid) -> bool:
+    """
+    Prueft ob zwischen Hot A und Hot B mindestens 128 Beats (32 Bars) liegen.
+    Returns: True wenn Abstand OK, False wenn zu nah.
+    """
+    a_beat = get_beat_index_at_time(hot_a_time, grid)
+    b_beat = get_beat_index_at_time(hot_b_time, grid)
+    distance = abs(b_beat - a_beat)
+    return distance >= MIN_HOT_A_B_DISTANCE_BEATS
+
+
+def _resolve_distance_conflict(hot_a_time: float, hot_b_time: float,
+                                hot_c_time: float,
+                                grid: BeatGrid, segments: list[Segment],
+                                cbr=None) -> tuple[float | None, str]:
+    """
+    Wenn Hot A und Hot B zu nah sind (< 128 Beats):
+    Analysiere aehnliche Tracks (CBR) um zu entscheiden ob Hot A
+    verschoben oder weggelassen wird.
+
+    Bei kurzen Tracks (Radio-Edits) wird meist auf Hot A verzichtet
+    oder ein alternativer Phrasenwechsel gesucht.
+
+    Returns: (neues hot_a_time oder None, Erklaerung)
+    """
+    # 1. Versuche alternativen Phrasenwechsel fuer Hot A
+    #    Suche einen frueheren Break der weit genug entfernt ist
+    for seg in segments:
+        if seg.kind == "break":
+            alt_time = snap_to_downbeat(seg.start_time, grid)
+            if _check_min_distance(alt_time, hot_b_time, grid):
+                return alt_time, "Alternativer Break (Abstandskorrektur)"
+
+    # 2. CBR-Fallback: Pruefe ob Trainings-Tracks Hot A haben
+    #    bei aehnlich kurzen Tracks
+    if cbr is not None and hasattr(cbr, 'twins') and cbr.twins:
+        # Bei Tracks mit wenig Twins mit Hot Cues: Skip Hot A
+        n_with_hots = 0
+        if cbr.hot_cue_pattern:
+            n_with_hots = cbr.hot_cue_pattern.get("n_twins_with_hots", 0)
+        if n_with_hots == 0:
+            return None, "Kein Hot A (kurzer Track, keine Referenz)"
+
+    # 3. Letzter Fallback: Hot A weglassen (typisch fuer Radio-Edits)
+    total_beats = grid.count
+    if total_beats < 400:  # < ~3min bei 128 BPM
+        return None, "Kein Hot A (Radio-Edit, Track zu kurz)"
+
+    # 4. Sonst: Hot A trotzdem setzen, aber naeher am Intro
+    first_break = _find_break_start(segments)
+    if first_break:
+        return snap_to_downbeat(first_break.start_time, grid), \
+            "Break Start (Abstand knapp)"
+
+    return None, "Kein Hot A (kein geeigneter Ankerpunkt)"
+
+
+# --- MIK-Hotspot-Selektion ---
+
+def _select_mik_break(
+    mik_spots: list[float],
+    grid: BeatGrid,
+    cbr=None,
+    segments: list[Segment] | None = None,
+) -> float | None:
+    """
+    Wählt den besten MIK-Cue als Break-Start-Kandidaten (Hot A).
+
+    Schritt 1: Kandidaten = MIK-Cues in erster Trackhälfte (nach Intro-Guard 5%)
+    Schritt 2: Segment-Tie-Breaker — bevorzuge Cues nahe 'break'/'intro' Segmenten
+    Schritt 3: CBR-Tie-Breaker — wähle Cue dessen relative Position am nächsten
+                an cbr.hot_cue_pattern['hot_a_relative_pos'] liegt
+    Fallback:  Letzter Kandidat in erster Hälfte
+    """
+    if not mik_spots or grid.times is None or len(grid.times) == 0:
+        return None
+
+    duration = float(grid.times[-1])
+    mid = float(grid.times[len(grid.times) // 2])
+    intro_guard = duration * 0.05  # Keine Cues in ersten 5% (Intro)
+
+    candidates = [t for t in sorted(mik_spots) if intro_guard < t < mid]
+    if not candidates:
+        return None
+
+    # Schritt 2: Segment-Klassifizierung als erster Tie-Breaker
+    if segments:
+        def _seg_kind_at(t: float) -> str:
+            kind = "unknown"
+            for seg in segments:
+                if seg.start_time <= t:
+                    kind = seg.kind
+                else:
+                    break
+            return kind
+
+        break_candidates = [t for t in candidates
+                            if _seg_kind_at(t) in ("break", "intro")]
+        if break_candidates:
+            candidates = break_candidates
+
+    # Schritt 3: CBR hot_a_relative_pos als Tie-Breaker
+    if cbr is not None:
+        expected_rel = cbr.hot_cue_pattern.get("hot_a_relative_pos")
+        if expected_rel and expected_rel > 0 and duration > 0:
+            return min(candidates, key=lambda t: abs(t / duration - expected_rel))
+
+    # Fallback: letzter Kandidat in erster Hälfte
+    return candidates[-1]
+
+
+def _select_mik_last_drop(mik_spots: list[float], grid: BeatGrid) -> float | None:
+    """Wählt den letzten MIK-Cue in der zweiten Trackhälfte als Last Drop (Hot C)."""
+    if not mik_spots or grid.times is None or len(grid.times) == 0:
+        return None
+    mid = float(grid.times[len(grid.times) // 2])
+    second_half = sorted([t for t in mik_spots if t >= mid])
+    return second_half[-1] if second_half else None
+
+
+def _snap_to_mik_cue(
+    time_sec: float,
+    mik_spots: list[float],
+    grid: BeatGrid,
+    tolerance_beats: int = 4,
+) -> float:
+    """
+    Snappt time_sec auf den nächsten MIK-Cue, falls innerhalb ±tolerance_beats.
+    Gibt time_sec unverändert zurück wenn kein MIK-Cue in Reichweite.
+    """
+    if not mik_spots:
+        return time_sec
+    beat_dur = 60.0 / grid.bpm
+    tol_sec = tolerance_beats * beat_dur
+    closest = min(mik_spots, key=lambda t: abs(t - time_sec))
+    if abs(closest - time_sec) <= tol_sec:
+        return closest
+    return time_sec
+
+
+def _filter_memory_near_hot(
+    memory_cues: list[CuePoint],
+    hot_times: list[float],
+    grid: BeatGrid,
+    min_beats: int = 32,
+) -> list[CuePoint]:
+    """
+    Entfernt Memory Cues die zu nah an einem Hot Cue liegen.
+    Mindestabstand: min_beats Beats (BPM-abhaengig).
+    """
+    if not hot_times:
+        return memory_cues
+    beat_dur = 60.0 / grid.bpm
+    min_sec = min_beats * beat_dur
+    return [
+        mc for mc in memory_cues
+        if not any(abs(mc.time_sec - ht) < min_sec for ht in hot_times)
+    ]
+
+
+def _filter_memory_spacing(
+    memory_cues: list[CuePoint],
+    grid: BeatGrid,
+    min_beats: int = 32,
+) -> list[CuePoint]:
+    """
+    Entfernt Memory Cues die zu nah aneinander liegen.
+    Mindestabstand: min_beats Beats (BPM-abhaengig).
+    Hoechste Prioritaet (kleinste Zahl) hat Vorrang.
+    """
+    if len(memory_cues) <= 1:
+        return memory_cues
+
+    beat_dur = 60.0 / max(grid.bpm, 1.0)
+    min_sec = min_beats * beat_dur
+
+    # Wichtigste Cues zuerst pruefen (nach Prio, dann Zeit)
+    sorted_cues = sorted(memory_cues, key=lambda c: (c.priority, c.time_sec))
+
+    kept: list[CuePoint] = []
+    for cue in sorted_cues:
+        if not any(abs(cue.time_sec - k.time_sec) < min_sec for k in kept):
+            kept.append(cue)
+
+    kept.sort(key=lambda c: c.time_sec)
+    return kept
+
+
+# --- Cue-Generierung ---
+
+def generate_cues(
+    analysis: TrackAnalysis,
+    cbr=None,
+    phrases: list[PhraseSegment] | None = None,
+    learned_offsets: dict | None = None,
+) -> tuple[list[CuePoint], list[CueDecision]]:
+    """
+    Hauptfunktion: Generiert alle Cue-Punkte aus der Track-Analyse.
+    v26.1: Triple-Check-Validierung (MIK x Phrase x Library) fuer Hot A und Hot C.
+
+    Args:
+        analysis:        TrackAnalysis mit Segments, Grid, Energy etc.
+        cbr:             Optional CBRResult mit adaptiven Parametern.
+        phrases:         Optional Liste von PSSI-PhraseSegments (aus phrase_reader).
+                         None = akustische Segmente als Fallback-Phrase-Quelle.
+        learned_offsets: Gelernte Offsets aus learning_db (Recursive Intelligence).
+                         Keys: "hot_a_offset_ms", "hot_c_offset_ms"
+
+    Returns:
+        (cues, decisions): Sortierte CuePoint-Liste + Entscheidungen fuer Status-Report.
+    """
+    grid = analysis.grid
+    segments = analysis.segments
+    cues: list[CuePoint] = []
+
+    if not segments:
+        return cues, []
+
+    # --- Adaptive Parameter aus CBR oder Defaults ---
+    _conf = _cfg.load_config()
+    hot_b_offset = _conf.get("hot_b_offset_beats", 32)
+    cue_spacing  = 32
+
+    if cbr is not None:
+        cue_spacing = cbr.cue_spacing
+        learned_b = (cbr.hot_cue_pattern or {}).get("hot_b_offset_beats", hot_b_offset)
+        if 16 <= int(learned_b) <= 64:
+            hot_b_offset = int(learned_b)
+
+    # --- Basiswerte ---
+    mik_spots: list[float] = getattr(analysis, 'mik_hotspots', []) or []
+    used_mik_times: set[float] = set()
+
+    duration    = float(grid.times[-1]) if len(grid.times) > 0 else 0.0
+    mid_sec     = float(grid.times[len(grid.times) // 2]) if len(grid.times) > 1 else duration / 2.0
+    intro_guard = duration * 0.05
+    beat_dur    = 60.0 / max(grid.bpm, 1.0)
+
+    # Gelernte Offsets: Recursive Intelligence hat Vorrang vor CBR-Slot
+    _lo          = learned_offsets or {}
+    learned_a_ms = _lo.get("hot_a_offset_ms") or getattr(cbr, 'hot_a_offset_ms', 0)
+    learned_c_ms = _lo.get("hot_c_offset_ms") or getattr(cbr, 'hot_c_offset_ms', 0)
+
+    # --- Kandidaten fuer Triple-Check ---
+    mik_cands_a: list[float] = [t for t in sorted(mik_spots)
+                                 if intro_guard < t < mid_sec]
+    mik_cands_c: list[float] = [t for t in sorted(mik_spots) if t >= mid_sec]
+
+    if phrases:
+        # PSSI-Phrasen (primaere Quelle in v26.1)
+        phrase_cands_a = [
+            p.time_start_sec for p in phrases
+            if p.kind_name == "Down" and intro_guard < p.time_start_sec < mid_sec
+        ]
+        phrase_cands_c = [
+            p.time_start_sec for p in phrases
+            if p.kind_name in ("Chorus", "Up") and p.time_start_sec >= mid_sec
+        ]
+    else:
+        # Akustische Segmente als Fallback-Phrase-Kandidaten
+        phrase_cands_a = [
+            seg.start_time for seg in segments
+            if seg.kind == "break" and intro_guard < seg.start_time < mid_sec
+        ]
+        phrase_cands_c = [
+            seg.start_time for seg in segments
+            if seg.kind == "drop" and seg.start_time >= mid_sec
+        ]
+        # Energetische Nicht-Outro-Segmente als Fallback fuer Hot C
+        if not phrase_cands_c:
+            phrase_cands_c = [
+                seg.start_time for seg in segments
+                if seg.kind not in ("intro", "outro")
+                and seg.start_time >= mid_sec
+                and seg.energy_mean > 0.5
+            ]
+        # Visual Edge als letzter Fallback
+        if not phrase_cands_c:
+            visual = getattr(analysis, 'visual_edge_last_drop', None)
+            if visual is not None:
+                phrase_cands_c = [visual]
+
+    # CBR-Kandidaten (relative Position x Tracklänge)
+    cbr_cand_a: float | None = None
+    cbr_cand_c: float | None = None
+    if cbr is not None and duration > 0:
+        patt = cbr.hot_cue_pattern or {}
+        rel_a = patt.get("hot_a_relative_pos")
+        if rel_a and float(rel_a) > 0:
+            cbr_cand_a = float(rel_a) * duration
+        rel_c = patt.get("hot_c_relative_pos")
+        if rel_c and float(rel_c) > 0:
+            cbr_cand_c = float(rel_c) * duration
+
+    # ============================================
+    # 1. Hot Cue C (3): "The Last Drop" — Triple-Check
+    # ============================================
+    decision_c = validate_hot_c(
+        mik_candidates=mik_cands_c,
+        phrase_candidates=phrase_cands_c,
+        cbr_candidate=cbr_cand_c,
+        grid=grid,
+        learned_offset_ms=int(learned_c_ms or 0),
+    )
+
+    hot_c_time: float | None = None
+    if decision_c.action == "set" and decision_c.time_sec is not None:
+        hot_c_time = snap_to_downbeat(decision_c.time_sec, grid)
+        for mik_t in mik_spots:
+            if abs(mik_t - decision_c.time_sec) <= beat_dur * 4:
+                used_mik_times.add(round(mik_t, 2))
+                break
+        cues.append(CuePoint(
+            time_sec=hot_c_time,
+            kind=3,
+            name="Hot C",
+            comment="The Last Drop",
+        ))
+
+    # ============================================
+    # 2. Hot Cue B (2): "The Setup" — abgeleitet
+    # ============================================
+    hot_b_time: float | None = None
+    if hot_c_time is not None:
+        hot_b_time = get_time_n_beats_before(hot_c_time, hot_b_offset, grid)
+
+        if mik_spots:
+            snapped = _snap_to_mik_cue(
+                hot_b_time, mik_spots, grid,
+                tolerance_beats=_MIK_SNAP_TOLERANCE_BEATS,
+            )
+            hot_b_time = snapped
+            for mik_t in mik_spots:
+                if abs(mik_t - hot_b_time) < 0.1:
+                    used_mik_times.add(round(mik_t, 2))
+                    break
+
+        if hot_b_time > grid.times[0]:
+            cues.append(CuePoint(
+                time_sec=hot_b_time,
+                kind=2,
+                name="Hot B",
+                comment=f"Setup ({hot_b_offset}b vor Drop)",
+            ))
+        else:
+            hot_b_time = None
+
+    decision_b = CueDecision(
+        kind=2,
+        time_sec=hot_b_time,
+        confidence=1.0 if hot_b_time is not None else 0.0,
+        sources=["derived"] if hot_b_time is not None else [],
+        rule_ok=hot_b_time is not None,
+        reason=(f"Abgeleitet: {hot_b_offset} Beats vor Hot C"
+                if hot_b_time is not None
+                else "Kein Hot C — Hot B entfaellt"),
+        action="set" if hot_b_time is not None else "skip",
+        comment=f"Setup ({hot_b_offset}b vor Drop)" if hot_b_time is not None else "",
+    )
+
+    # ============================================
+    # 3. Hot Cue A (1): "The Break" — Triple-Check
+    # ============================================
+    decision_a = validate_hot_a(
+        mik_candidates=mik_cands_a,
+        phrase_candidates=phrase_cands_a,
+        cbr_candidate=cbr_cand_a,
+        grid=grid,
+        hot_b_time=hot_b_time,
+        hot_c_time=hot_c_time,
+        learned_offset_ms=int(learned_a_ms or 0),
+    )
+
+    hot_a_time: float | None = None
+    if decision_a.action == "set" and decision_a.time_sec is not None:
+        snapped_a = snap_to_downbeat(decision_a.time_sec, grid)
+
+        # Constraint-Re-Check nach Snap auf Downbeat
+        if hot_b_time is not None and not _check_min_distance(
+                snapped_a, hot_b_time, grid):
+            decision_a = CueDecision(
+                kind=1, time_sec=None, confidence=0.0, sources=[],
+                rule_ok=False,
+                reason="Constraint verletzt nach Snap (< 128 Beats zu Hot B)",
+                action="skip", comment="",
+            )
+        elif hot_c_time is not None and snapped_a >= hot_c_time:
+            decision_a = CueDecision(
+                kind=1, time_sec=None, confidence=0.0, sources=[],
+                rule_ok=False,
+                reason="Constraint verletzt: Hot A liegt nach Hot C",
+                action="skip", comment="",
+            )
+        else:
+            _hot_times = {round(t, 2) for t in [hot_b_time, hot_c_time] if t}
+            if round(snapped_a, 2) not in _hot_times:
+                hot_a_time = snapped_a
+                for mik_t in mik_spots:
+                    if abs(mik_t - decision_a.time_sec) <= beat_dur * 4:
+                        used_mik_times.add(round(mik_t, 2))
+                        break
+                cues.append(CuePoint(
+                    time_sec=hot_a_time,
+                    kind=1,
+                    name="Hot A",
+                    comment="The Break",
+                ))
+
+    # ============================================
+    # 4. Memory Cues (max 10, priorisiert)
+    # ============================================
+    memory_cues = _generate_memory_cues(analysis, cue_spacing=cue_spacing)
+
+    # Restliche MIK-Cues → Memory-Anker (Prio 3)
+    if mik_spots:
+        for mik_t in mik_spots:
+            if round(mik_t, 2) in used_mik_times:
+                continue
+            snapped_mik = snap_to_downbeat(mik_t, grid)
+            memory_cues.append(CuePoint(
+                time_sec=snapped_mik,
+                kind=0,
+                name="MIK",
+                comment="MIK Anchor",
+                priority=3,
+            ))
+
+    hot_times = [t for t in [hot_a_time, hot_b_time, hot_c_time] if t is not None]
+    memory_cues = _filter_memory_near_hot(
+        memory_cues, hot_times, grid, min_beats=_MEMORY_MIN_HOT_BEATS
+    )
+    memory_cues = _filter_memory_spacing(
+        memory_cues, grid, min_beats=_MEMORY_MIN_HOT_BEATS
+    )
+    memory_cues = _apply_memory_cue_limit(memory_cues)
+
+    cues.extend(memory_cues)
+    cues.sort(key=lambda c: (c.time_sec, c.kind))
+    cues = _deduplicate_cues(cues)
+
+    return cues, [decision_a, decision_b, decision_c]
+
+
+# --- Memory Cue Generierung mit Priorisierung ---
+
+def _generate_memory_cues(analysis: TrackAnalysis,
+                           cue_spacing: int = 32) -> list[CuePoint]:
+    """
+    Generiert Memory Cues mit Prioritaets-System:
+      Prio 1: Erster Downbeat
+      Prio 2: Intro-Struktur (32-Beat-Schritte)
+      Prio 3: Primaere Ankerpunkte (First Drop, Second Break)
+      Prio 4: Phrasen-Uebergaenge (32b nach/vor Wechseln)
+      Prio 5: Outro-Struktur (KEIN letzter Schlag)
+
+    Jeder Cue bekommt eine Prioritaet. Bei Ueberschreitung des
+    10-Cue-Limits werden niedrig-priorisierte Cues entfernt.
+    """
+    grid = analysis.grid
+    segments = analysis.segments
+    cues: list[CuePoint] = []
+
+    if not segments:
+        return cues
+
+    intro = segments[0] if segments[0].kind == "intro" else None
+    outro = segments[-1] if segments[-1].kind == "outro" else None
+
+    # ---- Prio 1: Erster Downbeat ----
+    first_downbeat = _first_downbeat_time(grid)
+    cues.append(CuePoint(
+        time_sec=first_downbeat,
+        kind=0,
+        name="Memory 1",
+        comment="Erster Downbeat",
+        priority=1,
+    ))
+
+    # ---- Prio 2: Intro-Struktur (alle N Beats) ----
+    if intro:
+        intro_start_beat = get_beat_index_at_time(intro.start_time, grid)
+        intro_end_beat = get_beat_index_at_time(intro.end_time, grid)
+
+        beat = intro_start_beat + cue_spacing
+        step = 1
+        while beat < intro_end_beat and beat < grid.count:
+            t = get_time_at_beat(beat, grid)
+            cues.append(CuePoint(
+                time_sec=t,
+                kind=0,
+                name=f"Intro {step}",
+                comment=f"Intro +{step * cue_spacing} Beats",
+                priority=2,
+            ))
+            beat += cue_spacing
+            step += 1
+
+    # ---- Prio 3: Primaere Ankerpunkte (First Drop, Second Break) ----
+    first_drop = _find_first_drop(segments)
+    if first_drop:
+        t = snap_to_downbeat(first_drop.start_time, grid)
+        cues.append(CuePoint(
+            time_sec=t,
+            kind=0,
+            name="First Drop",
+            comment="First Drop",
+            priority=3,
+        ))
+
+    second_break = _find_second_break(segments)
+    if second_break:
+        t = snap_to_downbeat(second_break.start_time, grid)
+        cues.append(CuePoint(
+            time_sec=t,
+            kind=0,
+            name="Second Break",
+            comment="Second Break",
+            priority=3,
+        ))
+
+    # ---- Prio 4: Phrasen-Uebergaenge (Segment-Grenzen) ----
+    for i, seg in enumerate(segments):
+        if seg.kind in ("intro", "outro"):
+            continue
+        if i == 0:
+            continue
+
+        # Nicht First Drop / Second Break doppelt zaehlen
+        t = snap_to_downbeat(seg.start_time, grid)
+        already_exists = any(
+            abs(c.time_ms - int(round(t * 1000))) <= 500
+            for c in cues
+        )
+        if already_exists:
+            continue
+
+        cues.append(CuePoint(
+            time_sec=t,
+            kind=0,
+            name=f"Phrase {i}",
+            comment=f"{seg.kind.capitalize()} Start",
+            priority=4,
+        ))
+
+    # ---- Prio 5: Outro-Struktur (KEIN letzter Schlag) ----
+    if outro:
+        outro_start_beat = get_beat_index_at_time(outro.start_time, grid)
+        outro_end_beat = min(
+            get_beat_index_at_time(outro.end_time, grid),
+            grid.count - 1
+        )
+
+        # Outro-Cues: alle N Beats, aber NICHT bis zum absoluten Ende
+        # Stoppe mindestens cue_spacing Beats vor Track-Ende
+        # (kein Cue am "letzten Schlag")
+        safe_end_beat = outro_end_beat - cue_spacing
+        if safe_end_beat <= outro_start_beat:
+            safe_end_beat = outro_end_beat  # Sehr kurzes Outro: 1 Cue erlauben
+
+        beat = outro_start_beat
+        step = 0
+        while beat <= safe_end_beat and beat < grid.count:
+            t = get_time_at_beat(beat, grid)
+
+            # Letzten Schlag ueberspringen
+            if beat >= grid.count - 4:
+                break
+
+            label = ("Outro Start" if step == 0
+                     else f"Outro +{step * cue_spacing}")
+            cues.append(CuePoint(
+                time_sec=t,
+                kind=0,
+                name=f"Outro {step}",
+                comment=label,
+                priority=5,
+            ))
+            beat += cue_spacing
+            step += 1
+
+    return cues
+
+
+def _apply_memory_cue_limit(cues: list[CuePoint]) -> list[CuePoint]:
+    """
+    Begrenzt Memory Cues auf MAX_MEMORY_CUES (10).
+    Entfernt niedrig-priorisierte Cues zuerst.
+
+    Prioritaets-Reihenfolge:
+      1 = Erster Downbeat (immer behalten)
+      2 = Intro-Struktur
+      3 = Primaere Ankerpunkte (First Drop, Second Break)
+      4 = Phrasen-Uebergaenge
+      5 = Outro-Struktur
+    """
+    if len(cues) <= MAX_MEMORY_CUES:
+        return cues
+
+    # Sortiere nach Prioritaet (aufsteigend = wichtigste zuerst),
+    # dann nach Zeit (frueh → spaet)
+    sorted_cues = sorted(cues, key=lambda c: (c.priority, c.time_sec))
+
+    # Behalte die wichtigsten MAX_MEMORY_CUES
+    kept = sorted_cues[:MAX_MEMORY_CUES]
+
+    # Zurueck in zeitliche Reihenfolge
+    kept.sort(key=lambda c: c.time_sec)
+
+    return kept
+
+
+# --- Hilfsfunktionen ---
+
+def _first_downbeat_time(grid: BeatGrid) -> float:
+    """Findet den ersten Downbeat (Beat 1) im Grid."""
+    dt = grid.downbeat_times
+    if len(dt) > 0:
+        return float(dt[0])
+    return float(grid.times[0])
+
+
+def _deduplicate_cues(cues: list[CuePoint],
+                       tolerance_ms: int = 200) -> list[CuePoint]:
+    """
+    Entfernt Duplikate: Cues innerhalb von tolerance_ms werden zusammengefasst.
+    Hot Cues haben Vorrang vor Memory Cues.
+    """
+    if len(cues) <= 1:
+        return cues
+
+    cues.sort(key=lambda c: c.time_sec)
+    result: list[CuePoint] = []
+
+    for cue in cues:
+        merged = False
+        for i, existing in enumerate(result):
+            if abs(cue.time_ms - existing.time_ms) <= tolerance_ms:
+                # Duplikat: Hot Cue > Memory Cue, hoehere Slots > niedrigere
+                if cue.kind > existing.kind:
+                    result[i] = cue
+                merged = True
+                break
+        if not merged:
+            result.append(cue)
+
+    return result
+
+
+# --- Ausgabe ---
+
+def print_cues(cues: list[CuePoint], grid: BeatGrid) -> None:
+    """Gibt die Cue-Liste formatiert aus."""
+    print(f"\n{'='*60}")
+    print(f"  Generierte Cue-Punkte ({len(cues)} total)")
+    print(f"{'='*60}")
+
+    hot_cues = [c for c in cues if c.kind > 0]
+    mem_cues = [c for c in cues if c.kind == 0]
+
+    if hot_cues:
+        print(f"\n  Hot Cues ({len(hot_cues)}):")
+        for c in sorted(hot_cues, key=lambda x: x.kind):
+            m = int(c.time_sec // 60)
+            s = c.time_sec % 60
+            beat = get_beat_index_at_time(c.time_sec, grid)
+            bar = beat // 4 + 1
+            print(f"    Hot {chr(64 + c.kind):s}  [{m}:{s:05.2f}]  "
+                  f"Bar {bar:3d}  — {c.comment}")
+
+    if mem_cues:
+        print(f"\n  Memory Cues ({len(mem_cues)}, Max {MAX_MEMORY_CUES}):")
+        for c in mem_cues:
+            m = int(c.time_sec // 60)
+            s = c.time_sec % 60
+            beat = get_beat_index_at_time(c.time_sec, grid)
+            bar = beat // 4 + 1
+            prio = f"P{c.priority}" if c.priority < 99 else ""
+            print(f"    Mem    [{m}:{s:05.2f}]  "
+                  f"Bar {bar:3d}  {prio:3s} — {c.comment}")
+
+    # Hot A ↔ Hot B Abstandscheck anzeigen
+    hot_a = next((c for c in hot_cues if c.kind == 1), None)
+    hot_b = next((c for c in hot_cues if c.kind == 2), None)
+    if hot_a and hot_b:
+        a_beat = get_beat_index_at_time(hot_a.time_sec, grid)
+        b_beat = get_beat_index_at_time(hot_b.time_sec, grid)
+        dist = abs(b_beat - a_beat)
+        status = "✓" if dist >= MIN_HOT_A_B_DISTANCE_BEATS else "✗"
+        print(f"\n  Hot A ↔ Hot B: {dist} Beats "
+              f"({dist // 4} Bars) {status} "
+              f"(Min: {MIN_HOT_A_B_DISTANCE_BEATS})")
+
+    print()
