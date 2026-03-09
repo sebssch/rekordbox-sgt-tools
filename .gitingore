@@ -2,4 +2,5 @@
 
 .venv
 
-/app/data/*
+/app/data/
+/app/__pycache__/
