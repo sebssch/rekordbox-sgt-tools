@@ -1,6 +1,7 @@
 .DS_Store
 
 .venv
+app.log
 
 /app/data/
 /app/__pycache__/
