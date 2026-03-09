@@ -502,7 +502,7 @@ def generate_cues(
                 hot_b_time, mik_spots, grid,
                 tolerance_beats=_MIK_SNAP_TOLERANCE_BEATS,
             )
-            hot_b_time = snapped
+            hot_b_time = snap_to_downbeat(snapped, grid)  # MIK-Spots sind ggf. off-grid
             for mik_t in mik_spots:
                 if abs(mik_t - hot_b_time) < 0.1:
                     used_mik_times.add(round(mik_t, 2))

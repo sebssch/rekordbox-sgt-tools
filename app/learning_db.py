@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS tracks (
     bpm REAL,
     duration INTEGER,
     genre TEXT,
+    key TEXT DEFAULT '',
     energy_vector BLOB,
     fingerprint_hash TEXT,
     cluster_id INTEGER DEFAULT 0,
@@ -117,20 +118,50 @@ def get_db() -> sqlite3.Connection:
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    """Erstellt alle Tabellen falls nicht vorhanden."""
+    """Erstellt alle Tabellen falls nicht vorhanden. Fuehrt Migration durch."""
     conn.executescript(_SCHEMA)
+    # Migration: key-Spalte zu bestehenden DBs hinzufuegen
+    try:
+        conn.execute("ALTER TABLE tracks ADD COLUMN key TEXT DEFAULT ''")
+        conn.commit()
+    except Exception:
+        pass  # Spalte existiert bereits
     conn.commit()
 
 
 # --- Fingerprint-Berechnung ---
 
+def normalize_genre(raw: str) -> str:
+    """
+    Normalisiert einen Genre-String (lowercase, strip, max 20 Zeichen).
+    Leer zurueckgeben wenn unbekannt — dann greift nur BPM+Duration+Key.
+    """
+    return (raw or "").strip().lower()[:20]
+
+
+def _duration_bucket(seconds: float) -> str:
+    """
+    Gruppiert Tracklaenge in 4 Buckets fuer Fingerprint-Clustering.
+    Laengere Tracks haben typischerweise mehr Memory Cues und anderen Aufbau.
+    """
+    if seconds < 240:
+        return "short"     # < 4 min  → Edit / Single
+    if seconds < 360:
+        return "medium"    # 4–6 min  → Standard
+    if seconds < 480:
+        return "long"      # 6–8 min  → Extended Play
+    return "extended"      # > 8 min  → DJ-Edit
+
+
 def compute_fingerprint(bpm: float, energy_vector=None,
-                         genre: str = "") -> str:
+                         genre: str = "", duration_s: float = 0.0,
+                         key: str = "") -> str:
     """
     Berechnet einen Fingerprint-Hash fuer Track-Clustering.
     BPM wird in 5er-Buckets gerundet (z.B. 128 → "125-130").
     Energy-Vektor wird auf 16 Bins downsampled und quantisiert.
-    Genre wird lowercase normalisiert.
+    Genre (aus MP3-Tag), Duration-Bucket und Key-Gruppe (major/minor)
+    werden zur Differenzierung genutzt.
     Returns: SHA256-Hash-String (erste 16 Zeichen)
     """
     # BPM-Bucket (5er-Schritte)
@@ -152,11 +183,26 @@ def compute_fingerprint(bpm: float, energy_vector=None,
         quantized = (ev_norm * 9).astype(int)
         energy_str = "".join(str(q) for q in quantized)
 
-    # Genre normalisieren
-    genre_norm = genre.strip().lower() if genre else ""
+    # Genre normalisieren (aus MP3-Tag, vom User gepflegt)
+    genre_norm = normalize_genre(genre)
+
+    # Duration-Bucket (Tracklaenge als Strukturindikator)
+    dur_bucket = _duration_bucket(float(duration_s))
+
+    # Key-Gruppe: Camelot-Notation — A = minor, B = major
+    # Rekordbox speichert z.B. "11A" (minor) oder "11B" (major)
+    key_str = (key or "").strip()
+    if key_str.endswith("B"):
+        key_group = "major"
+    elif key_str.endswith("A"):
+        key_group = "minor"
+    else:
+        key_group = ""
 
     # Hash berechnen
-    fingerprint_input = f"{bpm_bucket}|{energy_str}|{genre_norm}"
+    fingerprint_input = (
+        f"{bpm_bucket}|{energy_str}|{genre_norm}|{dur_bucket}|{key_group}"
+    )
     hash_val = hashlib.sha256(fingerprint_input.encode()).hexdigest()
     return hash_val[:16]
 
@@ -165,7 +211,7 @@ def compute_fingerprint(bpm: float, energy_vector=None,
 
 def upsert_track(conn: sqlite3.Connection, content_id: str,
                   title: str, artist: str, bpm: float,
-                  duration: int, genre: str = "",
+                  duration: int, genre: str = "", key: str = "",
                   energy_vector=None) -> None:
     """Track in DB einfuegen oder aktualisieren."""
     # Energy-Vektor als Bytes speichern
@@ -174,21 +220,24 @@ def upsert_track(conn: sqlite3.Connection, content_id: str,
         ev = np.asarray(energy_vector, dtype=np.float64)
         ev_blob = ev.tobytes()
 
-    fp_hash = compute_fingerprint(bpm, energy_vector, genre)
+    duration_s = float(duration) if duration else 0.0
+    fp_hash = compute_fingerprint(bpm, energy_vector, genre,
+                                   duration_s=duration_s, key=key)
     now = datetime.now().isoformat(timespec="seconds")
 
     conn.execute("""
         INSERT INTO tracks (content_id, title, artist, bpm, duration,
-                            genre, energy_vector, fingerprint_hash, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            genre, key, energy_vector, fingerprint_hash, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(content_id) DO UPDATE SET
             title=excluded.title, artist=excluded.artist,
             bpm=excluded.bpm, duration=excluded.duration,
-            genre=excluded.genre, energy_vector=excluded.energy_vector,
+            genre=excluded.genre, key=excluded.key,
+            energy_vector=excluded.energy_vector,
             fingerprint_hash=excluded.fingerprint_hash,
             updated_at=excluded.updated_at
     """, (content_id, title, artist, bpm, duration,
-          genre, ev_blob, fp_hash, now))
+          genre, key, ev_blob, fp_hash, now))
     conn.commit()
 
 
@@ -361,7 +410,8 @@ def find_similar_fingerprints(conn: sqlite3.Connection,
 
 def get_learned_params_for_track(conn: sqlite3.Connection,
                                   bpm: float, energy_vector=None,
-                                  genre: str = "") -> dict:
+                                  genre: str = "", duration_s: float = 0.0,
+                                  key: str = "") -> dict:
     """
     Hauptfunktion fuer Inferenz: Findet passende gelernte Parameter
     fuer einen neuen Track basierend auf seinem Fingerprint.
@@ -376,7 +426,8 @@ def get_learned_params_for_track(conn: sqlite3.Connection,
     """
     result = {}
 
-    fp_hash = compute_fingerprint(bpm, energy_vector, genre)
+    fp_hash = compute_fingerprint(bpm, energy_vector, genre,
+                                   duration_s=duration_s, key=key)
 
     # 1. Exakter Match
     patterns = get_patterns_for_fingerprint(conn, fp_hash)
@@ -428,6 +479,8 @@ def get_auto_correction_offsets(
     conn: sqlite3.Connection,
     bpm: float,
     genre: str = "",
+    duration_s: float = 0.0,
+    key: str = "",
     energy_vector=None,
     confidence_threshold: float = 0.80,
 ) -> dict:
@@ -443,7 +496,8 @@ def get_auto_correction_offsets(
     """
     result = {"hot_a_offset_ms": 0, "hot_c_offset_ms": 0}
 
-    fp_hash = compute_fingerprint(bpm, energy_vector, genre)
+    fp_hash = compute_fingerprint(bpm, energy_vector, genre,
+                                   duration_s=duration_s, key=key)
 
     # 1. Fingerprint-spezifische Patterns
     patterns = get_patterns_for_fingerprint(conn, fp_hash)

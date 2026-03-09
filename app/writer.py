@@ -69,8 +69,34 @@ def check_rekordbox_running() -> bool:
     return result.returncode == 0
 
 
-def backup_database(db_path: str = None) -> str:
-    """Erstellt ein Backup der master.db. Gibt den Backup-Pfad zurueck."""
+def _prune_backups(db_path: str, keep: int = 5) -> list[str]:
+    """
+    Loescht die aeltesten Backups der master.db, sodass hoechstens *keep*
+    Backups erhalten bleiben. Gibt die Liste der geloeschten Pfade zurueck.
+
+    Backup-Namensschema: <db_path>.backup_YYYYMMDD_HHMMSS
+    """
+    db_path = Path(db_path)
+    pattern = db_path.name + ".backup_*"
+    backups = sorted(
+        db_path.parent.glob(pattern),
+        key=lambda p: p.stat().st_mtime,
+    )
+    to_delete = backups[: max(0, len(backups) - keep)]
+    deleted = []
+    for old in to_delete:
+        old.unlink()
+        deleted.append(str(old))
+        log.info("Altes Backup geloescht: %s", old)
+    return deleted
+
+
+def backup_database(db_path: str = None, keep: int = 5) -> str:
+    """
+    Erstellt ein Backup der master.db. Gibt den Backup-Pfad zurueck.
+    Prueft anschliessend, dass hoechstens *keep* Backups erhalten bleiben
+    (aelteste werden automatisch geloescht).
+    """
     if db_path is None:
         db_path = _MASTER_DB_PATH
 
@@ -79,6 +105,12 @@ def backup_database(db_path: str = None) -> str:
     shutil.copy2(db_path, backup_path)
     size_mb = os.path.getsize(backup_path) / (1024 * 1024)
     print(f"  Backup: {backup_path} ({size_mb:.1f} MB)")
+
+    deleted = _prune_backups(db_path, keep=keep)
+    if deleted:
+        for d in deleted:
+            print(f"  [alt] Backup entfernt: {Path(d).name}")
+
     return backup_path
 
 
@@ -426,6 +458,19 @@ def process_track(audio_path: str,
                 print(f"   CBR-Fehler: {e}. Nutze regelbasierte Logik.")
 
     # --- Recursive Intelligence: Auto-Korrektur-Offsets ---
+    # Genre + Key fuer Fingerprint auflösen (content koennte None sein)
+    _fp_content = content or find_content(db, resolved)
+    _fp_genre, _fp_key = "", ""
+    if _fp_content is not None:
+        try:
+            _fp_genre = (getattr(_fp_content, "GenreName", None) or "").strip().lower()
+        except Exception:
+            pass
+        try:
+            _fp_key = (getattr(_fp_content, "KeyName", None) or "").strip()
+        except Exception:
+            pass
+
     learned_offsets = {"hot_a_offset_ms": 0, "hot_c_offset_ms": 0}
     try:
         from app.learning_db import get_db as _get_ldb, get_auto_correction_offsets
@@ -433,6 +478,9 @@ def process_track(audio_path: str,
         _conf_threshold = _cfg.get("auto_correction_confidence_threshold", 0.80)
         learned_offsets = get_auto_correction_offsets(
             _lconn, grid.bpm,
+            genre=_fp_genre,
+            duration_s=float(duration),
+            key=_fp_key,
             confidence_threshold=float(_conf_threshold),
         )
         _lconn.close()
@@ -542,8 +590,16 @@ def _log_prediction_db(content, cues: list[CuePoint], cbr_result=None) -> None:
 
         conn = get_db()
 
-        # Track-Metadaten speichern
+        # Track-Metadaten speichern (inkl. Genre + Key aus Rekordbox = MP3-Tag)
         bpm = (content.BPM or 0) / 100.0
+        try:
+            genre = (getattr(content, "GenreName", None) or "").strip().lower()
+        except Exception:
+            genre = ""
+        try:
+            key = (getattr(content, "KeyName", None) or "").strip()
+        except Exception:
+            key = ""
         upsert_track(
             conn,
             content_id=str(content.ID),
@@ -551,7 +607,8 @@ def _log_prediction_db(content, cues: list[CuePoint], cbr_result=None) -> None:
             artist=content.Artist.Name if hasattr(content, 'Artist') and content.Artist else "",
             bpm=bpm,
             duration=content.Length or 0,
-            genre="",
+            genre=genre,
+            key=key,
         )
 
         # CBR-Daten extrahieren

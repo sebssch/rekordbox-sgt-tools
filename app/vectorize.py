@@ -3,7 +3,7 @@ v3 Track-Vektorisierung
 Berechnet Feature-Vektoren fuer alle Tracks in der Rekordbox-DB.
 Zwei Modi: 'db_only' (schnell, nur Metadaten) und 'full' (mit Audio-Energie).
 
-Vektor-Format (22 Dimensionen):
+Vektor-Format (23 Dimensionen):
   [0]     BPM (normalisiert)
   [1]     Dauer in Sekunden (normalisiert)
   [2]     Energie-Dichte (mittlere RMS, oder Cue-Dichte als Proxy)
@@ -11,6 +11,7 @@ Vektor-Format (22 Dimensionen):
   [19]    Cue-Dichte (Cues pro Minute)
   [20]    Anzahl Hot Cues
   [21]    Memory/Hot Cue Ratio
+  [22]    Musikalischer Key (Camelot-Wheel kodiert, 0.0-1.0)
 """
 
 import argparse
@@ -46,8 +47,59 @@ _DATA_DIR = os.path.join(_BASE_DIR, "data")
 VECTOR_CACHE = os.path.join(_DATA_DIR, "track_vectors.npz")
 META_CACHE = os.path.join(_DATA_DIR, "track_meta.pkl")
 
-VECTOR_DIM = 22
+VECTOR_DIM = 23
 N_HISTOGRAM_BINS = 16
+
+# Camelot-Wheel-Kodierung fuer musikalischen Key.
+# Rekordbox speichert den Key im Camelot-Format: "1A"-"12B"
+#   nA = Minor-Keys (1A=Am, 2A=Em, ..., 12A=Dm)  → Wert n        (1-12)
+#   nB = Major-Keys (1B=C,  2B=G,  ..., 12B=F)   → Wert n+12     (13-24)
+# Gesamt: 24 eindeutige Werte → normalisiert auf 0.04-1.0 (0 = unbekannt)
+def _parse_camelot(key_name: str) -> int:
+    """Wandelt Camelot-Key ('1A'-'12B') in Integer 1-24 um. 0 = unbekannt."""
+    s = key_name.strip()
+    if not s or len(s) < 2:
+        return 0
+    letter = s[-1].upper()
+    try:
+        num = int(s[:-1])
+    except ValueError:
+        return 0
+    if not (1 <= num <= 12) or letter not in ("A", "B"):
+        return 0
+    return num if letter == "A" else num + 12
+
+
+# --- Hilfsfunktionen fuer Metadaten-Extraktion ---
+
+def _get_genre(content) -> str:
+    """Liest Genre-Name aus Rekordbox (entspricht MP3-ID3-Tag). Lowercase."""
+    try:
+        name = getattr(content, "GenreName", None)
+        if name:
+            return name.strip().lower()[:20]
+    except Exception:
+        pass
+    return ""
+
+
+def _get_key_name(content) -> str:
+    """Liest Key-Bezeichnung aus Rekordbox (z.B. 'A minor', 'C major')."""
+    try:
+        name = getattr(content, "KeyName", None)
+        if name:
+            return name.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _key_to_camelot(key_name: str) -> float:
+    """
+    Wandelt Camelot-Key ('1A'-'12B') in normalisiertes Float um: 1-24 → 0.04-1.0.
+    Unbekannte Keys → 0.0 (neutraler Wert, kein Einfluss auf Aehnlichkeit).
+    """
+    return _parse_camelot(key_name) / 24.0
 
 
 # --- Feature-Extraktion pro Track ---
@@ -131,6 +183,9 @@ def vectorize_from_db(content) -> np.ndarray:
         vec[21] = n_memory / n_total
     else:
         vec[21] = 0.0
+
+    # [22] Musikalischer Key (Camelot-Wheel, 0.0 = unbekannt)
+    vec[22] = _key_to_camelot(_get_key_name(content))
 
     return vec
 
@@ -255,6 +310,8 @@ def build_vector_db(mode: str = "db_only") -> dict:
                 "artist": _get_artist_name(content),
                 "bpm": (content.BPM or 0) / 100.0,
                 "duration": content.Length or 0,
+                "genre": _get_genre(content),
+                "key": _get_key_name(content),
                 "path": content.FolderPath or "",
                 "n_cues": len(list(content.Cues)) if content.Cues else 0,
             })
@@ -268,6 +325,8 @@ def build_vector_db(mode: str = "db_only") -> dict:
                 "artist": "",
                 "bpm": 0.0,
                 "duration": 0,
+                "genre": "",
+                "key": "",
                 "path": "",
                 "n_cues": 0,
             })

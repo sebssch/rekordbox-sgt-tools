@@ -34,14 +34,20 @@ class CBRResult:
 
 # --- 2a. Similarity-Matching ---
 
-def find_twins(new_vector: np.ndarray, n: int = 5) -> list[dict]:
+def find_twins(new_vector: np.ndarray, n: int = 5,
+               genre: str = "") -> list[dict]:
     """
     Findet die Top-N aehnlichsten Tracks per Cosine-Similarity.
     Brute-Force auf 5146 Vektoren — instant.
 
+    Same-Genre-First: Wenn genre angegeben, wird zuerst innerhalb des
+    gleichen Genres gesucht. Werden dort nicht genuegend Zwillinge gefunden,
+    wird auf alle Tracks erweitert (Fallback).
+
     Args:
         new_vector: Normalisierter Feature-Vektor des neuen Tracks
         n: Anzahl Zwillinge
+        genre: Genre-String des neuen Tracks (lowercase, aus MP3-Tag)
 
     Returns:
         Liste von Dicts: [{"index": i, "similarity": 0.95,
@@ -56,33 +62,44 @@ def find_twins(new_vector: np.ndarray, n: int = 5) -> list[dict]:
 
     # Vektor-Normen fuer alle Tracks
     norms = np.linalg.norm(vectors, axis=1)
-    # Vermeide Division durch 0
     norms[norms == 0] = 1.0
 
     # Dot-Product aller Vektoren mit dem neuen Vektor
     dots = vectors @ new_vector
     similarities = dots / (norms * new_norm)
 
-    # Top-N (absteigend sortiert)
+    def _build_results(indices):
+        results = []
+        for idx in indices:
+            m = meta[idx]
+            results.append({
+                "index": int(idx),
+                "similarity": float(similarities[idx]),
+                "content_id": m["content_id"],
+                "title": m["title"],
+                "artist": m.get("artist", ""),
+                "bpm": m["bpm"],
+                "duration": m["duration"],
+                "genre": m.get("genre", ""),
+                "key": m.get("key", ""),
+                "path": m["path"],
+                "n_cues": m["n_cues"],
+            })
+        return results
+
+    # Same-Genre-First: nur Tracks im gleichen Genre durchsuchen
+    if genre:
+        genre_mask = np.array([m.get("genre", "") == genre for m in meta])
+        if genre_mask.sum() >= n:
+            genre_sims = similarities * genre_mask
+            top_genre = np.argsort(genre_sims)[::-1][:n]
+            results = _build_results(top_genre)
+            if len(results) >= n:
+                return results
+
+    # Fallback: alle Tracks (bisheriges Verhalten)
     top_indices = np.argsort(similarities)[::-1][:n]
-
-    results = []
-    for idx in top_indices:
-        sim = float(similarities[idx])
-        m = meta[idx]
-        results.append({
-            "index": int(idx),
-            "similarity": sim,
-            "content_id": m["content_id"],
-            "title": m["title"],
-            "artist": m.get("artist", ""),
-            "bpm": m["bpm"],
-            "duration": m["duration"],
-            "path": m["path"],
-            "n_cues": m["n_cues"],
-        })
-
-    return results
+    return _build_results(top_indices)
 
 
 # --- 2b. Cue-Spacing-Analyse ---
@@ -345,10 +362,15 @@ def run_cbr(analysis: TrackAnalysis,
         result.explanation = "CBR: Track nicht in DB. Regelbasierte Logik."
         return result
 
+    # Genre + Key aus Rekordbox (= aus MP3-Tag) lesen
+    from app.vectorize import _get_genre, _get_key_name
+    genre = _get_genre(content)
+    key   = _get_key_name(content)
+
     new_vec = vectorize_single(content, audio_path, scaler)
 
-    # --- 2. Zwillinge finden ---
-    twins = find_twins(new_vec, n=5)
+    # --- 2. Zwillinge finden (Same-Genre-First) ---
+    twins = find_twins(new_vec, n=5, genre=genre)
 
     # Eigenen Track aus Ergebnissen entfernen
     twins = [t for t in twins if t["content_id"] != content.ID][:5]
@@ -373,8 +395,12 @@ def run_cbr(analysis: TrackAnalysis,
     try:
         from app.learning_db import get_db as get_learning_db, get_learned_params_for_track
         learning_conn = get_learning_db()
-        bpm_val = (content.BPM or 0) / 100.0
-        learned = get_learned_params_for_track(learning_conn, bpm=bpm_val)
+        bpm_val  = (content.BPM or 0) / 100.0
+        dur_s    = float(content.Length or 0)
+        learned = get_learned_params_for_track(
+            learning_conn, bpm=bpm_val,
+            genre=genre, duration_s=dur_s, key=key,
+        )
         learning_conn.close()
     except Exception:
         # Fallback: alte learned_params.json
