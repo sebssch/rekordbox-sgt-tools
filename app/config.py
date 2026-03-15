@@ -39,6 +39,9 @@ def _defaults() -> dict:
         "min_corrections":   3,
         "log_file":          "app.log",
         "log_level":         "INFO",
+        "cue_engine":                    "auto",   # "auto"|"pwav"|"acoustic"
+        "pwav_confidence_threshold":     0.4,      # Min-P fuer PWAV-Kandidaten
+        "memory_min_end_distance_beats": 32,       # Mind. N Beats vor Track-Ende
     }
 
 

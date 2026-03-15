@@ -48,6 +48,7 @@ rekordbox_db_path: ""             # z.B. "~/Library/Pioneer/rekordbox/master.db"
 mik_db_path: ""                   # z.B. "~/Library/Application Support/MixedInKey/Collection11.mikdb"
 
 # --- Learning ---
+use_learned_offsets: false         # Gelernte Offsets deaktiviert (ML-Predictor ersetzt dies)
 min_corrections: 3                # Mindest-Korrekturen bevor Parameter angepasst wird
 
 # --- Logging ---

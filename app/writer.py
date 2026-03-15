@@ -340,7 +340,8 @@ def process_track(audio_path: str,
                   verbose: bool = True,
                   use_cbr: bool = True) -> "ProcessResult":
     """
-    Komplette v26.1-Pipeline: Analyse → CBR → Triple-Check → Cue-Schreiben.
+    Komplette v27-Pipeline: Analyse → CBR → PWAV-ML → Quad-Check → Cue-Schreiben.
+    Falls kein PWAV-Modell vorhanden: Fallback auf Triple-Check.
     Standardmaessig im Dry-Run-Modus!
 
     Args:
@@ -419,6 +420,10 @@ def process_track(audio_path: str,
             s = seg.start_time % 60
             print(f"     {i}. [{m}:{s:05.2f}] {seg.kind:8s} E={seg.energy_mean:.2f}")
 
+    # --- Content auto-resolve (fuer MIK-Lookup und spaetere Schritte) ---
+    if content is None:
+        content = find_content(db, resolved)
+
     # --- MIK-Hotspots: Externe Cue-Positionen aus Mixed In Key ---
     try:
         from app.mik_scraper import get_mik_data
@@ -472,37 +477,71 @@ def process_track(audio_path: str,
             pass
 
     learned_offsets = {"hot_a_offset_ms": 0, "hot_c_offset_ms": 0}
-    try:
-        from app.learning_db import get_db as _get_ldb, get_auto_correction_offsets
-        _lconn = _get_ldb()
-        _conf_threshold = _cfg.get("auto_correction_confidence_threshold", 0.80)
-        learned_offsets = get_auto_correction_offsets(
-            _lconn, grid.bpm,
-            genre=_fp_genre,
-            duration_s=float(duration),
-            key=_fp_key,
-            confidence_threshold=float(_conf_threshold),
-        )
-        _lconn.close()
-        if verbose and (learned_offsets.get("hot_a_offset_ms")
-                        or learned_offsets.get("hot_c_offset_ms")):
-            print(f"   Auto-Korrektur: "
-                  f"A={learned_offsets['hot_a_offset_ms']}ms  "
-                  f"C={learned_offsets['hot_c_offset_ms']}ms")
-    except Exception:
-        pass  # Kein Abbruch bei fehlendem learning_db
+    _use_learned = _cfg.get("use_learned_offsets", True)
+    if _use_learned:
+        try:
+            from app.learning_db import get_db as _get_ldb, get_auto_correction_offsets
+            _lconn = _get_ldb()
+            _conf_threshold = _cfg.get("auto_correction_confidence_threshold", 0.80)
+            learned_offsets = get_auto_correction_offsets(
+                _lconn, grid.bpm,
+                genre=_fp_genre,
+                duration_s=float(duration),
+                key=_fp_key,
+                confidence_threshold=float(_conf_threshold),
+            )
+            _lconn.close()
+            if verbose and (learned_offsets.get("hot_a_offset_ms")
+                            or learned_offsets.get("hot_c_offset_ms")):
+                print(f"   Auto-Korrektur: "
+                      f"A={learned_offsets['hot_a_offset_ms']}ms  "
+                      f"C={learned_offsets['hot_c_offset_ms']}ms")
+        except Exception:
+            pass  # Kein Abbruch bei fehlendem learning_db
+    elif verbose:
+        print("   Learned Offsets: deaktiviert (use_learned_offsets: false)")
 
-    # --- Cue-Generierung (Triple-Check) ---
+    # --- ML Prediction (LightGBM, ersetzt PWAV Random Forest) ---
+    pwav_candidates = None
+    _conf = _cfg.load_config()
+    if _conf.get("cue_engine", "auto") in ("ml", "pwav", "auto"):
+        try:
+            from app.ml_predictor import predict_cue_positions
+            _mik_for_ml = getattr(analysis, '_mik_data_raw', None)
+            try:
+                from app.mik_scraper import get_mik_data as _get_mik_ml
+                _mik_for_ml = _get_mik_ml(
+                    resolved,
+                    (getattr(content, 'ArtistName', '') or '') if content else '',
+                    (getattr(content, 'Title', '') or '') if content else '',
+                )
+            except Exception:
+                pass
+            pwav_candidates = predict_cue_positions(
+                content, dat_path, ext_path, grid, db,
+                mik_data=_mik_for_ml,
+            )
+            if verbose and pwav_candidates:
+                n = sum(len(v) for v in pwav_candidates.values())
+                print(f"   ML-Predictor: {n} Kandidaten generiert")
+        except FileNotFoundError:
+            pass  # Kein trainiertes Modell → Fallback auf Triple-Check
+        except Exception as e:
+            log.warning("ML-Predictor Fehler: %s", e)
+
+    # --- Cue-Generierung (Quad-Check) ---
+    check_label = "Quad-Check" if pwav_candidates else "Triple-Check"
     if verbose:
-        print("4. Cues generieren (Triple-Check)...")
+        print(f"4. Cues generieren ({check_label})...")
     cues, decisions = generate_cues(
         analysis,
         cbr=cbr_result,
         phrases=phrases,
         learned_offsets=learned_offsets,
+        pwav_candidates=pwav_candidates,
     )
     if verbose:
-        print("\n   Triple-Check Ergebnis:")
+        print(f"\n   {check_label} Ergebnis:")
         for line in build_status_report(decisions):
             print(line)
         print_cues(cues, grid)

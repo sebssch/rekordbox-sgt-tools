@@ -132,6 +132,7 @@ def _find_last_drop_segment(segments: list[Segment],
 
     # Bevorzuge letzten Drop in der zweiten Trackhälfte
     if grid is not None and len(grid.times) > 0:
+        duration = float(grid.times[-1])
         mid = float(grid.times[len(grid.times) // 2])
         second_half = [d for d in drops if d.start_time >= mid]
         if second_half:
@@ -173,13 +174,16 @@ def _find_first_high_energy(segments: list[Segment],
 def _check_min_distance(hot_a_time: float, hot_b_time: float,
                          grid: BeatGrid) -> bool:
     """
-    Prueft ob zwischen Hot A und Hot B mindestens 128 Beats (32 Bars) liegen.
+    Prueft ob zwischen Hot A und Hot B genug Abstand liegt.
+    Dynamisch: max(64, min(128, track_beats // 4)) — lockert bei kurzen/langsamen Tracks.
     Returns: True wenn Abstand OK, False wenn zu nah.
     """
+    track_beats = grid.count if hasattr(grid, 'count') else len(grid.times)
+    min_beats = max(64, min(MIN_HOT_A_B_DISTANCE_BEATS, track_beats // 4))
     a_beat = get_beat_index_at_time(hot_a_time, grid)
     b_beat = get_beat_index_at_time(hot_b_time, grid)
     distance = abs(b_beat - a_beat)
-    return distance >= MIN_HOT_A_B_DISTANCE_BEATS
+    return distance >= min_beats
 
 
 def _resolve_distance_conflict(hot_a_time: float, hot_b_time: float,
@@ -331,6 +335,27 @@ def _filter_memory_near_hot(
     ]
 
 
+def _filter_memory_near_end(
+    memory_cues: list[CuePoint],
+    grid: BeatGrid,
+    min_end_beats: int = 32,
+) -> list[CuePoint]:
+    """
+    Entfernt Memory Cues die zu nah am Track-Ende liegen.
+    Regel: KEIN Memory Cue in den letzten N Beats des Tracks.
+    Betrifft alle Quellen: Outro (Prio 5), MIK-Anker (Prio 3), PWAV-Anker (Prio 4).
+
+    Args:
+        min_end_beats: Mindestabstand vom Track-Ende in Beats (Default: 32 = 1 Bar).
+    """
+    if not memory_cues or grid.count <= 0 or len(grid.times) == 0:
+        return memory_cues
+    beat_dur = 60.0 / max(grid.bpm, 1.0)
+    end_time = float(grid.times[-1])
+    min_end_sec = min_end_beats * beat_dur
+    return [mc for mc in memory_cues if mc.time_sec <= end_time - min_end_sec]
+
+
 def _filter_memory_spacing(
     memory_cues: list[CuePoint],
     grid: BeatGrid,
@@ -366,10 +391,11 @@ def generate_cues(
     cbr=None,
     phrases: list[PhraseSegment] | None = None,
     learned_offsets: dict | None = None,
+    pwav_candidates: dict | None = None,
 ) -> tuple[list[CuePoint], list[CueDecision]]:
     """
     Hauptfunktion: Generiert alle Cue-Punkte aus der Track-Analyse.
-    v26.1: Triple-Check-Validierung (MIK x Phrase x Library) fuer Hot A und Hot C.
+    v27: Quad-Check-Validierung (MIK x Phrase x Library x PWAV-ML) fuer Hot A und Hot C.
 
     Args:
         analysis:        TrackAnalysis mit Segments, Grid, Energy etc.
@@ -378,6 +404,9 @@ def generate_cues(
                          None = akustische Segmente als Fallback-Phrase-Quelle.
         learned_offsets: Gelernte Offsets aus learning_db (Recursive Intelligence).
                          Keys: "hot_a_offset_ms", "hot_c_offset_ms"
+        pwav_candidates: Optional PWAV-ML Kandidaten aus dj_validator.extract_candidates().
+                         Dict mit Keys "hot_a", "hot_c", "memory" → Listen von Sek.-Zeiten.
+                         None = kein PWAV-Modell vorhanden → Fallback auf Triple-Check.
 
     Returns:
         (cues, decisions): Sortierte CuePoint-Liste + Entscheidungen fuer Status-Report.
@@ -419,11 +448,51 @@ def generate_cues(
                                  if intro_guard < t < mid_sec]
     mik_cands_c: list[float] = [t for t in sorted(mik_spots) if t >= mid_sec]
 
+    # MIK × Segment-Priorisierung: break/build-Cues zuerst fuer Hot A,
+    # drop-Cues zuerst fuer Hot C. Verhindert falsche Kandidatenwahl bei
+    # hoher MIK-Cue-Dichte (8 Cues pro Track, nur 1-2 sind Break/Drop).
+    if segments and mik_cands_a:
+        _intro_pref_mik = duration * 0.20 if duration > 0 else float('inf')
+        def _mik_seg_prio_a(t: float) -> tuple[int, int]:
+            pos_tier = 0 if t <= _intro_pref_mik else 1
+            for seg in segments:
+                if seg.start_time <= t < seg.end_time:
+                    if seg.kind in ("break", "build"):
+                        return (pos_tier, 0)
+                    elif seg.kind in ("verse",):
+                        return (pos_tier, 1)
+                    elif seg.kind in ("intro",):
+                        return (pos_tier, 2)
+            return (pos_tier, 3)
+        mik_cands_a.sort(key=_mik_seg_prio_a)
+
+    if segments and mik_cands_c:
+        def _mik_seg_prio_c(t: float) -> int:
+            for seg in segments:
+                if seg.start_time <= t < seg.end_time:
+                    if seg.kind == "drop":
+                        return 0
+                    elif seg.kind in ("break", "build"):
+                        return 1
+            return 2
+        mik_cands_c.sort(key=_mik_seg_prio_c)
+
     if phrases:
         # PSSI-Phrasen (primaere Quelle in v26.1)
+        # Hot A: Down, Up (Build) und zweite+ Intro-Phrase ("Intro 2")
+        _intro_count = 0
+        _valid_intro_times: list[float] = []
+        for p in phrases:
+            if p.kind_name == "Intro":
+                _intro_count += 1
+                if _intro_count >= 2:
+                    _valid_intro_times.append(p.time_start_sec)
+
         phrase_cands_a = [
             p.time_start_sec for p in phrases
-            if p.kind_name == "Down" and intro_guard < p.time_start_sec < mid_sec
+            if (p.kind_name in ("Down", "Up")
+                or p.time_start_sec in _valid_intro_times)
+            and intro_guard < p.time_start_sec < mid_sec
         ]
         phrase_cands_c = [
             p.time_start_sec for p in phrases
@@ -433,12 +502,34 @@ def generate_cues(
         # Akustische Segmente als Fallback-Phrase-Kandidaten
         phrase_cands_a = [
             seg.start_time for seg in segments
-            if seg.kind == "break" and intro_guard < seg.start_time < mid_sec
+            if seg.kind in ("break", "build") and intro_guard < seg.start_time < mid_sec
         ]
         phrase_cands_c = [
             seg.start_time for seg in segments
             if seg.kind == "drop" and seg.start_time >= mid_sec
         ]
+        # Outro-Drop-Erkennung: Wenn letzter Drop < 30s vor Trackende,
+        # und ein vorheriger Drop mindestens gleich viel Energy hat,
+        # schiebe den Outro-Drop ans Ende der Liste (= niedrigere Prioritaet).
+        if len(phrase_cands_c) >= 2 and duration > 0:
+            _last_drop_seg = next(
+                (s for s in reversed(segments)
+                 if s.kind == "drop" and s.start_time >= mid_sec),
+                None,
+            )
+            if _last_drop_seg and (duration - _last_drop_seg.start_time) < duration * 0.20:
+                _prev_drop_seg = next(
+                    (s for s in reversed(segments)
+                     if s.kind == "drop"
+                     and s.start_time >= mid_sec
+                     and s.start_time < _last_drop_seg.start_time),
+                    None,
+                )
+                if (_prev_drop_seg
+                        and _prev_drop_seg.energy_mean >= _last_drop_seg.energy_mean):
+                    phrase_cands_c = [t for t in phrase_cands_c
+                                     if t != _last_drop_seg.start_time]
+                    phrase_cands_c.append(_last_drop_seg.start_time)
         # Energetische Nicht-Outro-Segmente als Fallback fuer Hot C
         if not phrase_cands_c:
             phrase_cands_c = [
@@ -453,6 +544,12 @@ def generate_cues(
             if visual is not None:
                 phrase_cands_c = [visual]
 
+    # 20%-Intro-Praeferenz: Kandidaten in den ersten 20% des Tracks
+    # werden vor spaeteren Kandidaten getestet.
+    if phrase_cands_a and duration > 0:
+        _intro_pref = duration * 0.20
+        phrase_cands_a.sort(key=lambda t: (0 if t <= _intro_pref else 1, t))
+
     # CBR-Kandidaten (relative Position x Tracklänge)
     cbr_cand_a: float | None = None
     cbr_cand_c: float | None = None
@@ -465,8 +562,17 @@ def generate_cues(
         if rel_c and float(rel_c) > 0:
             cbr_cand_c = float(rel_c) * duration
 
+    # PWAV-ML Kandidaten (4. Quelle im Quad-Check)
+    pwav_cands_a: list[float] = []
+    pwav_cands_c: list[float] = []
+    pwav_memory:  list[float] = []
+    if pwav_candidates:
+        pwav_cands_a = pwav_candidates.get("hot_a", [])
+        pwav_cands_c = pwav_candidates.get("hot_c", [])
+        pwav_memory  = pwav_candidates.get("memory", [])
+
     # ============================================
-    # 1. Hot Cue C (3): "The Last Drop" — Triple-Check
+    # 1. Hot Cue C (3): "The Last Drop" — Quad-Check
     # ============================================
     decision_c = validate_hot_c(
         mik_candidates=mik_cands_c,
@@ -474,6 +580,8 @@ def generate_cues(
         cbr_candidate=cbr_cand_c,
         grid=grid,
         learned_offset_ms=int(learned_c_ms or 0),
+        pwav_candidates=pwav_cands_c,
+        duration=duration,
     )
 
     hot_c_time: float | None = None
@@ -532,7 +640,7 @@ def generate_cues(
     )
 
     # ============================================
-    # 3. Hot Cue A (1): "The Break" — Triple-Check
+    # 3. Hot Cue A (1): "The Break" — Quad-Check
     # ============================================
     decision_a = validate_hot_a(
         mik_candidates=mik_cands_a,
@@ -542,6 +650,8 @@ def generate_cues(
         hot_b_time=hot_b_time,
         hot_c_time=hot_c_time,
         learned_offset_ms=int(learned_a_ms or 0),
+        pwav_candidates=pwav_cands_a,
+        duration=duration,
     )
 
     hot_a_time: float | None = None
@@ -554,7 +664,7 @@ def generate_cues(
             decision_a = CueDecision(
                 kind=1, time_sec=None, confidence=0.0, sources=[],
                 rule_ok=False,
-                reason="Constraint verletzt nach Snap (< 128 Beats zu Hot B)",
+                reason="Constraint verletzt nach Snap (< min Beats zu Hot B)",
                 action="skip", comment="",
             )
         elif hot_c_time is not None and snapped_a >= hot_c_time:
@@ -598,9 +708,23 @@ def generate_cues(
                 priority=3,
             ))
 
+    # PWAV-Memory als zusaetzliche Anker (Priority 4, nach MIK)
+    if pwav_memory:
+        for pm_t in pwav_memory:
+            snapped = snap_to_downbeat(pm_t, grid)
+            if not any(abs(snapped - c.time_sec) < beat_dur * 8 for c in memory_cues):
+                memory_cues.append(CuePoint(
+                    time_sec=snapped, kind=0, name="PWAV",
+                    comment="PWAV Predicted", priority=4,
+                ))
+
     hot_times = [t for t in [hot_a_time, hot_b_time, hot_c_time] if t is not None]
     memory_cues = _filter_memory_near_hot(
         memory_cues, hot_times, grid, min_beats=_MEMORY_MIN_HOT_BEATS
+    )
+    memory_cues = _filter_memory_near_end(           # kein letzter Schlag
+        memory_cues, grid,
+        min_end_beats=_conf.get("memory_min_end_distance_beats", 32),
     )
     memory_cues = _filter_memory_spacing(
         memory_cues, grid, min_beats=_MEMORY_MIN_HOT_BEATS

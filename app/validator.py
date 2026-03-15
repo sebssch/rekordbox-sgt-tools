@@ -83,9 +83,13 @@ def _check_hot_a_constraints(t: float,
     """
     Prueft Hard Constraints fuer Hot Cue A:
       - mind. MIN_HOT_A_B_DISTANCE_BEATS Abstand zu Hot B
+        (dynamisch: bei kurzen/langsamen Tracks auf track_beats // 4 reduziert,
+         Minimum 64 Beats)
       - muss vor Hot C liegen
     """
-    min_beats = _cfg.get("min_hot_a_b_distance_beats", 128)
+    configured = _cfg.get("min_hot_a_b_distance_beats", 128)
+    track_beats = grid.count if hasattr(grid, 'count') else len(grid.times)
+    min_beats = max(64, min(configured, track_beats // 4))
 
     if hot_b_time is not None:
         idx_a = get_beat_index_at_time(t, grid)
@@ -109,13 +113,15 @@ def validate_hot_a(
     hot_b_time:        float | None = None,
     hot_c_time:        float | None = None,
     learned_offset_ms: int = 0,          # Gelernter Offset (pre-correction)
+    pwav_candidates:   list[float] | None = None,  # PWAV-ML Kandidaten (Sek.)
+    duration:          float = 0.0,      # Track-Dauer fuer 20%-Intro-Praeferenz
 ) -> CueDecision:
     """
     Validiert Hot Cue A (The Break — erster Down/Break-Teil).
 
     Ablauf:
-      Stufe 1: Jeder MIK-Kandidat wird gegen Phrase-Starts (±tol Beats) geprueft.
-               Erstes Match das Hard Constraints besteht → gesetzt.
+      Stufe 1: Alle MIK×Phrase Matches sammeln, per Score bewerten
+               (Segment-Typ + CBR-Naehe + 20%-Intro-Bonus), besten waehlen.
       Stufe 2: CBR-Kandidat bestaetigt MIK oder Phrase (±4*tol Beats).
       Stufe 3: Kein Konsens → skip.
 
@@ -124,20 +130,69 @@ def validate_hot_a(
     tol = float(_cfg.get("phrase_match_tolerance_beats", 2))
 
     # Pre-correction: gelernten Offset auf Kandidaten anwenden
-    offset_sec  = learned_offset_ms / 1000.0
+    # P0: Offset auf ±2000ms begrenzen um negative Zeiten zu vermeiden
+    _clamped_offset = max(-2000, min(2000, learned_offset_ms))
+    offset_sec  = _clamped_offset / 1000.0
     mik_adj     = [t + offset_sec for t in mik_candidates]
     phrase_adj  = [t + offset_sec for t in phrase_candidates]
 
     chosen:  float | None = None
     sources: list[str]    = []
 
-    # --- Stufe 1: MIK × Phrase ---
+    # --- Stufe 1: Kandidaten-Pool aus MIK×Phrase + MIK×ML ---
+    # MIK×Phrase Matches (klassischer Konsens)
+    _mik_phrase_matches: list[tuple[float, list[str]]] = []
     for mik_t in mik_adj:
         if _closest_within(mik_t, phrase_adj, grid, tol) is not None:
             if _check_hot_a_constraints(mik_t, hot_b_time, hot_c_time, grid):
-                chosen  = mik_t
-                sources = ["mik", "phrase"]
-                break
+                _mik_phrase_matches.append((mik_t, ["mik", "phrase"]))
+
+    # MIK×ML Matches (ML-Prediction bestaetigt MIK-Cue)
+    _mik_ml_matches: list[tuple[float, list[str]]] = []
+    if pwav_candidates:
+        _pwav_t = pwav_candidates[0]
+        for mik_t in mik_adj:
+            # Kein Duplikat wenn bereits in MIK×Phrase
+            if any(abs(mik_t - mp[0]) < 0.1 for mp in _mik_phrase_matches):
+                continue
+            if _closest_within(_pwav_t, [mik_t], grid, tol * 4) is not None:
+                if _check_hot_a_constraints(mik_t, hot_b_time, hot_c_time, grid):
+                    _mik_ml_matches.append((mik_t, ["mik", "pwav"]))
+
+    # Alle Kandidaten zusammenfuehren
+    _all_candidates = _mik_phrase_matches + _mik_ml_matches
+
+    if _all_candidates:
+        if len(_all_candidates) == 1:
+            chosen = _all_candidates[0][0]
+            sources = _all_candidates[0][1]
+        else:
+            # Score: niedrigerer Wert = besser
+            cbr_adj_s1 = (cbr_candidate + offset_sec) if cbr_candidate is not None else None
+            _intro_zone = duration * 0.20 if duration > 0 else float('inf')
+            beat_dur = 60.0 / max(grid.bpm, 1.0)
+            _ml_t = pwav_candidates[0] if pwav_candidates else None
+
+            def _score_hot_a(entry: tuple[float, list[str]]) -> float:
+                t, srcs = entry
+                score = 0.0
+                # ML-Naehe: staerkstes Signal (trainiert auf 4430 Tracks)
+                if _ml_t is not None and duration > 0:
+                    score += abs(t - _ml_t) / duration * 0.6
+                # CBR-Naehe
+                if cbr_adj_s1 is not None and duration > 0:
+                    score += abs(t - cbr_adj_s1) / (duration * 2)
+                # 20%-Intro-Bonus
+                if t <= _intro_zone:
+                    score -= 0.15
+                # Mehr Quellen = besser (MIK×Phrase = 2 Quellen-Bonus)
+                if "phrase" in srcs and "mik" in srcs:
+                    score -= 0.05
+                return score
+
+            best = min(_all_candidates, key=_score_hot_a)
+            chosen = best[0]
+            sources = best[1]
 
     # --- Stufe 2: CBR bestaetigt eine Quelle ---
     if chosen is None and cbr_candidate is not None:
@@ -156,17 +211,75 @@ def validate_hot_a(
                 chosen  = phrase_match
                 sources = ["phrase", "library"]
 
-    # --- Stufe 3: Kein Konsens ---
+    # --- Stufe 2.5: PWAV-ML bestaetigt eine andere Quelle ---
+    if chosen is None and pwav_candidates:
+        for pwav_t in pwav_candidates:
+            # PWAV × MIK
+            mik_match = _closest_within(pwav_t, mik_adj, grid, tol * 2)
+            if mik_match is not None and _check_hot_a_constraints(mik_match, hot_b_time, hot_c_time, grid):
+                chosen  = mik_match
+                sources = ["mik", "pwav"]
+                break
+            # PWAV × Phrase
+            phrase_match = _closest_within(pwav_t, phrase_adj, grid, tol * 2)
+            if phrase_match is not None and _check_hot_a_constraints(phrase_match, hot_b_time, hot_c_time, grid):
+                chosen  = phrase_match
+                sources = ["phrase", "pwav"]
+                break
+            # PWAV × CBR
+            if cbr_candidate is not None:
+                cbr_adj = cbr_candidate + offset_sec
+                if abs(pwav_t - cbr_adj) <= tol * 4 * (60.0 / max(grid.bpm, 1.0)):
+                    if _check_hot_a_constraints(pwav_t, hot_b_time, hot_c_time, grid):
+                        chosen  = pwav_t
+                        sources = ["pwav", "library"]
+                        break
+
+        # PWAV allein (niedrigste Konfidenz, aber besser als skip)
+        if chosen is None:
+            for pwav_t in pwav_candidates:
+                if _check_hot_a_constraints(pwav_t, hot_b_time, hot_c_time, grid):
+                    chosen  = pwav_t
+                    sources = ["pwav"]
+                    break
+
+    # --- Stufe 3: MIK-only oder Phrase-only Fallback (besser als Skip) ---
+    if chosen is None and mik_adj:
+        # MIK allein: fruehesten Kandidaten nehmen der Constraints erfuellt
+        for mik_t in mik_adj:
+            if _check_hot_a_constraints(mik_t, hot_b_time, hot_c_time, grid):
+                chosen  = mik_t
+                sources = ["mik"]
+                break
+
+    if chosen is None and phrase_adj:
+        for ph_t in phrase_adj:
+            if _check_hot_a_constraints(ph_t, hot_b_time, hot_c_time, grid):
+                chosen  = ph_t
+                sources = ["phrase"]
+                break
+
+    # --- Stufe 4: Kein Konsens ---
     if chosen is None:
         return CueDecision(
             kind=1, time_sec=None, confidence=0.0, sources=[],
             rule_ok=False,
-            reason="No Consensus: MIK, Phrase und Library stimmen nicht überein",
+            reason="No Consensus: MIK, Phrase, Library und PWAV stimmen nicht überein",
             action="skip", comment="",
         )
 
+    # P0: Negative Zeiten abfangen
+    if chosen < 0:
+        return CueDecision(
+            kind=1, time_sec=None, confidence=0.0, sources=[],
+            rule_ok=False,
+            reason="Ungültige Zeit (negativ) — Offset-Problem",
+            action="skip", comment="",
+        )
+
+    _n_sources = 4.0  # Quad-Check: MIK, Phrase, Library, PWAV
     return CueDecision(
-        kind=1, time_sec=chosen, confidence=len(sources) / 3.0,
+        kind=1, time_sec=chosen, confidence=len(sources) / _n_sources,
         sources=sources, rule_ok=True,
         reason=f"Konsens: {'+'.join(s.upper() for s in sources)}",
         action="set", comment="The Break",
@@ -181,6 +294,8 @@ def validate_hot_c(
     cbr_candidate:     float | None,     # CBR: hot_c_relative_pos * duration
     grid:              BeatGrid,
     learned_offset_ms: int = 0,
+    pwav_candidates:   list[float] | None = None,  # PWAV-ML Kandidaten (Sek.)
+    duration:          float = 0.0,      # Track-Dauer fuer Outro-Drop-Erkennung
 ) -> CueDecision:
     """
     Validiert Hot Cue C (The Last Drop — zweiter/letzter Drop/Chorus).
@@ -191,19 +306,54 @@ def validate_hot_c(
     """
     tol = float(_cfg.get("phrase_match_tolerance_beats", 2))
 
-    offset_sec  = learned_offset_ms / 1000.0
+    # P0: Offset auf ±2000ms begrenzen
+    _clamped_offset = max(-2000, min(2000, learned_offset_ms))
+    offset_sec  = _clamped_offset / 1000.0
     mik_adj     = [t + offset_sec for t in mik_candidates]
     phrase_adj  = [t + offset_sec for t in phrase_candidates]
 
     chosen:  float | None = None
     sources: list[str]    = []
 
-    # --- Stufe 1: MIK × Phrase (von hinten = letzter Match zuerst) ---
-    for mik_t in sorted(mik_adj, reverse=True):
+    # --- Stufe 1: MIK × Phrase ---
+    # Alle MIK-Cues die einen Phrase-Match haben sammeln,
+    # dann bewerten: Nicht-Outro zuerst, CBR als Tiebreaker (nicht Hauptfaktor).
+    _outro_thresh = duration * 0.80 if duration > 0 else float('inf')
+    _mik_phrase_matches: list[float] = []
+    for mik_t in mik_adj:
         if _closest_within(mik_t, phrase_adj, grid, tol) is not None:
-            chosen  = mik_t
-            sources = ["mik", "phrase"]
-            break
+            _mik_phrase_matches.append(mik_t)
+
+    if _mik_phrase_matches:
+        # P2: Nicht-Outro Drops zuerst filtern, CBR nur als Tiebreaker
+        _non_outro = [t for t in _mik_phrase_matches if t < _outro_thresh]
+        _pool = _non_outro if _non_outro else _mik_phrase_matches
+
+        if cbr_candidate is not None and len(_pool) > 1:
+            cbr_adj_s1 = cbr_candidate + offset_sec
+            chosen = min(_pool, key=lambda t: abs(t - cbr_adj_s1))
+        else:
+            chosen = _pool[-1]  # Letzten (spaetesten) nicht-Outro Drop nehmen
+        sources = ["mik", "phrase"]
+
+    # --- Stufe 1.5: PWAV × MIK oder PWAV × Phrase (vor CBR) ---
+    # Nur fuer Hot C: Modell-Accuracy 71% bei ±8 Beats
+    # tol * 4 = 8 Beats — entspricht ~1,4 Bins der PWAV-Map (Bin ≈ 2,66 s)
+    # Iteration in Modell-Konfidenz-Reihenfolge (hoechste P zuerst, aus dj_validator)
+    if chosen is None and pwav_candidates:
+        for pwav_t in pwav_candidates:
+            # PWAV × MIK
+            mik_match = _closest_within(pwav_t, mik_adj, grid, tol * 4)
+            if mik_match is not None:
+                chosen  = mik_match
+                sources = ["mik", "pwav"]
+                break
+            # PWAV × Phrase
+            phrase_match = _closest_within(pwav_t, phrase_adj, grid, tol * 4)
+            if phrase_match is not None:
+                chosen  = phrase_match
+                sources = ["phrase", "pwav"]
+                break
 
     # --- Stufe 2: CBR bestaetigt ---
     if chosen is None and cbr_candidate is not None:
@@ -220,13 +370,53 @@ def validate_hot_c(
                 chosen  = phrase_match
                 sources = ["phrase", "library"]
 
+    # --- Stufe 2.5: PWAV-ML bestaetigt eine andere Quelle ---
+    # Iteration in Modell-Konfidenz-Reihenfolge (hoechste P zuerst)
+    if chosen is None and pwav_candidates:
+        for pwav_t in pwav_candidates:
+            # PWAV × MIK
+            mik_match = _closest_within(pwav_t, mik_adj, grid, tol * 2)
+            if mik_match is not None:
+                chosen  = mik_match
+                sources = ["mik", "pwav"]
+                break
+            # PWAV × Phrase
+            phrase_match = _closest_within(pwav_t, phrase_adj, grid, tol * 2)
+            if phrase_match is not None:
+                chosen  = phrase_match
+                sources = ["phrase", "pwav"]
+                break
+            # PWAV × CBR
+            if cbr_candidate is not None:
+                cbr_adj = cbr_candidate + offset_sec
+                if abs(pwav_t - cbr_adj) <= tol * 4 * (60.0 / max(grid.bpm, 1.0)):
+                    chosen  = pwav_t
+                    sources = ["pwav", "library"]
+                    break
+
     # --- Fallback: Einzelne beste Quelle (Hot C ist zu wichtig um zu ueberspringen) ---
     if chosen is None:
-        if mik_adj:
-            chosen  = mik_adj[-1]   # Letzter MIK-Cue in 2. Haelfte
+        # PWAV allein hat Vorrang vor reinem MIK/Phrase-Fallback
+        if pwav_candidates:
+            chosen  = pwav_candidates[0]   # PWAV-Kandidat mit hoechster Modell-Konfidenz
+            sources = ["pwav"]
+        elif mik_adj:
+            # CBR als Anker, sonst Nicht-Outro bevorzugen
+            if cbr_candidate is not None and len(mik_adj) > 1:
+                cbr_adj_fb = cbr_candidate + offset_sec
+                chosen = min(mik_adj, key=lambda t: abs(t - cbr_adj_fb))
+            else:
+                _non_outro_m = [t for t in mik_adj if t < _outro_thresh]
+                chosen = _non_outro_m[-1] if _non_outro_m else mik_adj[-1]
             sources = ["mik"]
         elif phrase_adj:
-            chosen  = phrase_adj[-1]
+            # CBR als Anker, sonst Nicht-Outro bevorzugen
+            if cbr_candidate is not None and len(phrase_adj) > 1:
+                cbr_adj_fb = cbr_candidate + offset_sec
+                chosen = min(phrase_adj, key=lambda t: abs(t - cbr_adj_fb))
+            else:
+                _non_outro_p = [t for t in phrase_adj if t < _outro_thresh]
+                chosen = _non_outro_p[-1] if _non_outro_p else phrase_adj[-1]
             sources = ["phrase"]
         elif cbr_candidate is not None:
             chosen  = cbr_candidate + offset_sec
@@ -239,8 +429,17 @@ def validate_hot_c(
             action="skip", comment="",
         )
 
+    # P0: Negative Zeiten abfangen
+    if chosen < 0:
+        return CueDecision(
+            kind=3, time_sec=None, confidence=0.0, sources=[],
+            rule_ok=False, reason="Ungültige Zeit (negativ) — Offset-Problem",
+            action="skip", comment="",
+        )
+
+    _n_sources = 4.0  # Quad-Check
     return CueDecision(
-        kind=3, time_sec=chosen, confidence=len(sources) / 3.0,
+        kind=3, time_sec=chosen, confidence=len(sources) / _n_sources,
         sources=sources, rule_ok=True,
         reason=f"Konsens: {'+'.join(s.upper() for s in sources)}",
         action="set", comment="The Last Drop",

@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# Models & Training Data
+models/
+data/
+app/data/
+
+# Logs
+app.log
+*.log
+
+# macOS
+.DS_Store
+
+# IDE
+.claude/
+.idea/
+.vscode/

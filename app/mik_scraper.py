@@ -115,7 +115,8 @@ def _scrape_mik_db(artist: str, title: str) -> MikData | None:
         ).fetchall()
         conn.close()
 
-        cue_times = [float(c["ZTIME"]) for c in cues if c["ZTIME"] is not None]
+        cue_times = [float(c["ZTIME"]) for c in cues
+                     if c["ZTIME"] is not None and float(c["ZTIME"]) > 0]
 
         if cue_times or energy is not None:
             return MikData(cue_times=cue_times, energy=energy, source="db")
