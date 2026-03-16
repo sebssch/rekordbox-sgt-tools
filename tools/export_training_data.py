@@ -31,6 +31,7 @@ from app.phrase_reader import read_phrases
 from app.mik_scraper import get_mik_data
 from app.vectorize import vectorize_from_db, load_vector_db, _key_to_camelot
 from app.cbr import find_twins, analyze_hot_cue_pattern
+from app.spectral import extract_spectral_features, get_spectral_dim
 from app import config as _cfg
 
 # --- Feature-Dimensionen ---
@@ -41,7 +42,13 @@ PHRASE_DIM       = 41   # 20 Kinds + 20 Rel-Starts + Count
 CBR_DIM          = 13   # 5 Twin Hot A + 5 Twin Hot C + Median A + Median C + Spacing
 EXTRA_DIM        = 2    # Beat Count, Bar Count
 
-FEATURE_DIM_FAST = PWAV_DIM + METADATA_DIM + MIK_DIM + PHRASE_DIM + CBR_DIM + EXTRA_DIM  # 469
+FEATURE_DIM_BASE = PWAV_DIM + METADATA_DIM + MIK_DIM + PHRASE_DIM + CBR_DIM + EXTRA_DIM  # 469
+FEATURE_DIM_FAST = FEATURE_DIM_BASE  # Wird dynamisch erweitert via get_feature_dim()
+
+
+def get_feature_dim(spectral_mode: str = "off") -> int:
+    """Gibt die gesamte Feature-Dimension inkl. optionaler Spektral-Features zurueck."""
+    return FEATURE_DIM_BASE + get_spectral_dim(spectral_mode)
 
 # Memory Cue Labels: Positionen 2-6 (Index 1-5) — die "inneren" Strukturpositionen
 # Pos 1 = First Downbeat (~0%), Pos 7-10 = Outro-Bereich → Regelsystem reicht
@@ -113,12 +120,15 @@ def extract_labels(db) -> dict[str, dict]:
 
 
 def extract_features_fast(content, dat_path: str, ext_path: str,
-                           db, vectors_norm=None, meta_list=None) -> np.ndarray:
+                           db, vectors_norm=None, meta_list=None,
+                           spectral_mode: str = "off") -> np.ndarray:
     """
-    Schnelle Feature-Extraktion ohne Audio-Decode.
-    Returns: 1D Array shape (FEATURE_DIM_FAST,)
+    Feature-Extraktion fuer ML Training.
+    Optional mit Spektral-Features (erfordert Audio-Dateien).
+    Returns: 1D Array shape (get_feature_dim(spectral_mode),)
     """
-    features = np.zeros(FEATURE_DIM_FAST, dtype=np.float32)
+    total_dim = get_feature_dim(spectral_mode)
+    features = np.zeros(total_dim, dtype=np.float32)
     offset = 0
 
     # --- PWAV (400) ---
@@ -212,15 +222,43 @@ def extract_features_fast(content, dat_path: str, ext_path: str,
     except Exception:
         pass
 
+    # --- Spektral-Features (optional, am Ende angehaengt) ---
+    spectral_dim = get_spectral_dim(spectral_mode)
+    if spectral_dim > 0:
+        audio_path = content.FolderPath or ""
+        duration = content.Length or 0
+        cache_dir = str(_cfg.get("spectral_cache_dir", "data/spectral_cache"))
+        try:
+            spec_feat = extract_spectral_features(
+                audio_path, duration, mode=spectral_mode, cache_dir=cache_dir
+            )
+            if spec_feat is not None and len(spec_feat) == spectral_dim:
+                features[FEATURE_DIM_BASE:FEATURE_DIM_BASE + spectral_dim] = spec_feat
+        except Exception as e:
+            pass  # Spektral-Features auf 0 lassen bei Fehler
+
     return features
 
 
-def export_dataset(mode: str = "fast", output_dir: str = "data/ml") -> dict:
+def export_dataset(mode: str = "fast", output_dir: str = "data/ml",
+                   spectral_mode: str | None = None) -> dict:
     """
     Hauptfunktion: Extrahiert Features + Labels fuer alle Tracks.
+
+    Args:
+        mode:           "fast" oder "full"
+        output_dir:     Ausgabeverzeichnis
+        spectral_mode:  "custom"|"openl3"|"auto"|"off" (None = aus config.yaml)
     """
+    # Spektral-Mode bestimmen
+    if spectral_mode is None:
+        spectral_mode = str(_cfg.get("spectral_mode", "off"))
+    spec_dim = get_spectral_dim(spectral_mode)
+    total_dim = get_feature_dim(spectral_mode)
+
     print("=" * 60)
     print("  ML Training Data Export")
+    print(f"  Spektral-Mode: {spectral_mode} (+{spec_dim} dims = {total_dim} total)")
     print("=" * 60)
 
     t0 = time.time()
@@ -255,14 +293,15 @@ def export_dataset(mode: str = "fast", output_dir: str = "data/ml") -> dict:
         print("   CBR Twin Features werden auf 0 gesetzt")
 
     # 4. Features extrahieren
-    print(f"\n4. Feature-Extraktion ({mode} mode)...")
+    desc = f"Extrahiere ({spectral_mode})" if spectral_mode != "off" else "Extrahiere"
+    print(f"\n4. Feature-Extraktion ({mode} mode, spectral={spectral_mode})...")
     feature_list = []
     label_list = []
     mem_label_list = []
     meta_out = []
     skipped = 0
 
-    for content_id, lbl in tqdm(labels.items(), desc="Extrahiere"):
+    for content_id, lbl in tqdm(labels.items(), desc=desc):
         content = lbl["content"]
         paths = _get_anlz_paths(content, db_dir)
         if paths is None:
@@ -274,6 +313,7 @@ def export_dataset(mode: str = "fast", output_dir: str = "data/ml") -> dict:
             feat = extract_features_fast(
                 content, dat_path, ext_path, db,
                 vectors_norm=vectors_norm, meta_list=meta_list,
+                spectral_mode=spectral_mode,
             )
             feature_list.append(feat)
             label_list.append([lbl["hot_a_rel"], lbl["hot_c_rel"]])
@@ -349,6 +389,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ML Training Data Export")
     parser.add_argument("--mode", default="fast", choices=["fast", "full"])
     parser.add_argument("--output", default="data/ml")
+    parser.add_argument("--spectral", default=None,
+                        choices=["custom", "openl3", "auto", "off"],
+                        help="Spektral-Feature-Mode (ueberschreibt config.yaml)")
     args = parser.parse_args()
 
-    export_dataset(mode=args.mode, output_dir=args.output)
+    export_dataset(mode=args.mode, output_dir=args.output,
+                   spectral_mode=args.spectral)

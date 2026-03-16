@@ -1,8 +1,8 @@
-# Rekordbox AutoCue v27
+# Rekordbox AutoCue v27.2
 
 > ML-basierte Cue-Point-Vorhersage fuer Rekordbox — lernt aus deinen ~5.000 Tracks.
 
-AutoCue analysiert deine Tracks akustisch, nutzt Mixed In Key-Daten und ein LightGBM-Modell trainiert auf deiner Bibliothek — vollautomatisch, ohne Rekordbox-Cloud.
+AutoCue analysiert deine Tracks akustisch (Spektrogramm + Waveform), nutzt Mixed In Key-Daten und ein LightGBM-Modell trainiert auf deiner Bibliothek — vollautomatisch, ohne Rekordbox-Cloud.
 
 ---
 
@@ -12,7 +12,8 @@ AutoCue analysiert deine Tracks akustisch, nutzt Mixed In Key-Daten und ein Ligh
 |---------|-------------|
 | **Beatgrid-Sync** | Cues snappen exakt auf Downbeats via ANLZ-Beatgrid |
 | **Quad-Check (v27)** | Jeder Hot Cue unabhaengig validiert: MIK x Phrase x Library x ML |
-| **LightGBM ML (v27)** | Supervised Learning auf 4.430 Tracks — Hot C 100% Accuracy (5/5 Test) |
+| **LightGBM ML (v27)** | Supervised Learning auf 4.430 Tracks |
+| **Spektral-Features (v27.2)** | Mel-Spektrogramm-Analyse: Band-Energien, Novelty, Onset, Contrast, Flatness |
 | **PSSI-Phrasen** | Rekordbox-Phrase-Analyse aus ANLZ .EXT-Dateien (Intro/Drop/Break/Outro) |
 | **Akustische Segmentierung** | SSM + Novelty + Energy + Percussive Ratio |
 | **MIK-Integration** | Mixed In Key Cue-Positionen als primaere Hotspots (ID3-Tags + SQLite) |
@@ -93,6 +94,10 @@ memory_min_hot_distance_beats: 32
 cue_engine: "auto"              # "auto" = ML wenn Modell vorhanden, sonst Triple-Check
 use_learned_offsets: false       # Gelernte Offsets deaktiviert (ML-Predictor ersetzt dies)
 
+# Spektral-Features
+spectral_mode: "custom"         # "custom" | "openl3" | "auto" | "off"
+spectral_cache_dir: "data/spectral_cache"
+
 # Playlist die analysiert werden soll
 analyse_playlist: "--analyse-tracks"
 ```
@@ -129,16 +134,19 @@ Nutzt PWAV-Waveforms, MIK-Daten, PSSI-Phrasen und CBR-Twin-Positionen als Featur
 ```bash
 source .venv/bin/activate
 
-# Schritt 1: Trainingsdaten exportieren (~7 Minuten fuer 4.430 Tracks)
-python tools/export_training_data.py --mode fast
-# → data/ml/features_X.npy  (4430, 469)
+# Schritt 1: Trainingsdaten exportieren (~17 Minuten fuer 4.430 Tracks, danach Cache)
+python tools/export_training_data.py --spectral custom
+# → data/ml/features_X.npy  (4430, 693)
 # → data/ml/labels_Y.npy    (4430, 2)
+# → data/ml/labels_mem_Y.npy (4430, 5)
 # → data/ml/meta.pkl
+# → data/spectral_cache/     (gecachte Spektral-Features)
 
 # Schritt 2: Modelle trainieren + Cross-Validation
 python tools/train_cue_model.py
-# → models/ml_hot_a.lgb  (~3 MB)
-# → models/ml_hot_c.lgb  (~3 MB)
+# → models/ml_hot_a.lgb     (~3 MB)
+# → models/ml_hot_c.lgb     (~3 MB)
+# → models/ml_mem_2..6.lgb  (~3 MB je)
 # → 5-Fold CV mit Beat-Accuracy Metriken
 ```
 
@@ -213,13 +221,14 @@ rekordbox-autocue-tool/
 ├── README.md
 ├── app.log                  ← Automatisch erstellt (Laufzeit-Log)
 │
-├── app/                     ← Aktive Pipeline (v27)
+├── app/                     ← Aktive Pipeline (v27.2)
 │   ├── config.py            ← Config-Loader (config.yaml → Python dict)
 │   ├── batch.py             ← CLI-Einstiegspunkt, rich Terminal-UI
 │   ├── writer.py            ← Rekordbox DB-Writer + ProcessResult (v27-Pipeline)
 │   ├── cue_logic.py         ← Quad-Check Cue-Hierarchie (v27)
 │   ├── validator.py         ← Quad-Check Validator (MIK x Phrase x Library x ML)
-│   ├── ml_predictor.py      ← LightGBM Inference (Hot A + Hot C Prediction)
+│   ├── ml_predictor.py      ← LightGBM Inference (Hot A + Hot C + Memory Prediction)
+│   ├── spectral.py          ← Spektral-Feature-Extraktion (custom/openl3/auto)
 │   ├── phrase_reader.py     ← PSSI-Phrasen aus ANLZ .EXT-Dateien
 │   ├── segments.py          ← Akustische Segmentierung (SSM + Novelty)
 │   ├── beatgrid.py          ← ANLZ-Beatgrid-Reader, Snap-to-Grid
@@ -233,12 +242,16 @@ rekordbox-autocue-tool/
 │
 ├── models/                  ← Trainierte LightGBM-Modelle
 │   ├── ml_hot_a.lgb         ← Hot A Regressor (~3 MB)
-│   └── ml_hot_c.lgb         ← Hot C Regressor (~3 MB)
+│   ├── ml_hot_c.lgb         ← Hot C Regressor (~3 MB)
+│   └── ml_mem_2..6.lgb      ← Memory Cue Regressoren (Slot 2-6)
 │
 ├── data/ml/                 ← ML-Trainingsdaten
-│   ├── features_X.npy       ← Feature-Matrix (4430, 469)
-│   ├── labels_Y.npy         ← Labels (4430, 2)
+│   ├── features_X.npy       ← Feature-Matrix (4430, 693)
+│   ├── labels_Y.npy         ← Hot Cue Labels (4430, 2)
+│   ├── labels_mem_Y.npy     ← Memory Cue Labels (4430, 5)
 │   └── meta.pkl             ← Track-Metadaten
+│
+├── data/spectral_cache/     ← Gecachte Spektral-Features (pro Track)
 │
 └── tools/                   ← Entwicklungs-Tools
     ├── export_training_data.py  ← Feature-Export fuer ML-Training
@@ -250,7 +263,7 @@ rekordbox-autocue-tool/
 
 ## ML-Modell Details
 
-Das LightGBM-Modell nutzt 469 Features pro Track:
+Das LightGBM-Modell nutzt 693 Features pro Track (469 Base + 224 Spektral):
 
 | Slot | Feature | Dimension |
 |------|---------|-----------|
@@ -260,13 +273,40 @@ Das LightGBM-Modell nutzt 469 Features pro Track:
 | 413-453 | Phrase Kinds + Rel-Starts + Count | 41 |
 | 454-466 | CBR Twin Positionen + Spacing | 13 |
 | 467-468 | Beat Count, Bar Count | 2 |
+| 469-500 | Spektral: Low-Band Energie (20-300 Hz) | 32 |
+| 501-532 | Spektral: Mid-Band Energie (300-4000 Hz) | 32 |
+| 533-564 | Spektral: High-Band Energie (4000+ Hz) | 32 |
+| 565-596 | Spektral: Spectral Novelty | 32 |
+| 597-628 | Spektral: Onset Strength | 32 |
+| 629-660 | Spektral: Spectral Contrast | 32 |
+| 661-692 | Spektral: Spectral Flatness | 32 |
 
-Cross-Validation Ergebnisse (5-Fold, 4.430 Tracks):
+### Spektral-Modi
+
+| Mode | Feature-Dim | Beschreibung |
+|------|-------------|-------------|
+| `off` | 469 | Nur PWAV + Metadaten (schnellster Modus) |
+| `custom` | 693 | +224 eigene librosa-Features (7 x 32 Segmente) |
+| `openl3` | 981 | +512 vortrainierte CNN-Embeddings (torchopenl3, Python <3.14) |
+| `auto` | 1205 | custom + openl3 kombiniert, LightGBM waehlt relevante Features |
+
+Die Spektral-Features werden pro Track einmal berechnet (~1s) und im Cache gespeichert (`data/spectral_cache/`).
+
+### Cross-Validation Ergebnisse (5-Fold, 4.430 Tracks)
 
 | Cue | ML MAE | Baseline MAE | Verbesserung | ±8b Accuracy |
 |-----|--------|--------------|--------------|--------------|
-| Hot A | 34.6b | 37.7b | +8.3% | 28.8% |
-| Hot C | 14.4b | 27.1b | +46.8% | 54.2% |
+| Hot A | 34.3b | 37.7b | +9.0% | 30.1% |
+| Hot C | 14.0b | 27.1b | +48.5% | 54.2% |
+| Mem 2 | 15.3b | 15.4b | +0.4% | 47.8% |
+| Mem 3 | 28.2b | 31.6b | +10.8% | 25.2% |
+| Mem 4 | 30.6b | 34.3b | +10.8% | 23.0% |
+| Mem 5 | 33.8b | 38.4b | +11.8% | 18.6% |
+| Mem 6 | 39.7b | 43.9b | +9.7% | 14.8% |
+
+Top Feature Importances (Spektral):
+- **Hot A**: Spectral Contrast (Breakdown-Erkennung) + High-Band Energie
+- **Hot C**: Mid/Low-Band Energie am Track-Ende (Last Drop)
 
 ---
 
@@ -277,6 +317,8 @@ Cross-Validation Ergebnisse (5-Fold, 4.430 Tracks):
 | `v26` | Produktionsreife Basis-Pipeline |
 | `v26.1` | Triple-Check + PSSI-Phrasen |
 | `v27` | Quad-Check + LightGBM ML trainiert auf 4.430 Tracks |
+| `v27.1` | Memory Cue ML-Modelle (Slot 2-6), Konfidenz-Scoring, Phrase×ML Source |
+| `v27.2` | Spektral-Features: Mel-Spektrogramm-Analyse (7 Features x 32 Segmente = +224 dims) |
 
 ---
 

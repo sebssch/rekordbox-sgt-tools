@@ -14,6 +14,8 @@ import os
 
 import numpy as np
 
+from app import config as _cfg
+
 log = logging.getLogger("autocue.ml_predictor")
 
 MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
@@ -144,6 +146,7 @@ def _extract_features(content, dat_path: str, ext_path: str,
     from app.vectorize import vectorize_from_db, load_vector_db, _key_to_camelot
     from app.cbr import find_twins, analyze_hot_cue_pattern
     from app.mik_scraper import get_mik_data as _get_mik
+    from app.spectral import extract_spectral_features, get_spectral_dim
 
     PWAV_DIM = 400
     METADATA_DIM = 4
@@ -151,7 +154,11 @@ def _extract_features(content, dat_path: str, ext_path: str,
     PHRASE_DIM = 41
     CBR_DIM = 13
     EXTRA_DIM = 2
-    TOTAL = PWAV_DIM + METADATA_DIM + MIK_DIM + PHRASE_DIM + CBR_DIM + EXTRA_DIM
+    BASE_DIM = PWAV_DIM + METADATA_DIM + MIK_DIM + PHRASE_DIM + CBR_DIM + EXTRA_DIM
+
+    spectral_mode = str(_cfg.get("spectral_mode", "off"))
+    spectral_dim = get_spectral_dim(spectral_mode)
+    TOTAL = BASE_DIM + spectral_dim
 
     features = np.zeros(TOTAL, dtype=np.float32)
     offset = 0
@@ -245,6 +252,19 @@ def _extract_features(content, dat_path: str, ext_path: str,
                 features[offset + 12] = pattern.get("cue_spacing", 32) / 64.0
     except Exception:
         pass
+
+    # --- Spektral-Features (optional, am Ende angehaengt) ---
+    if spectral_dim > 0:
+        audio_path = content.FolderPath or ""
+        cache_dir = str(_cfg.get("spectral_cache_dir", "data/spectral_cache"))
+        try:
+            spec_feat = extract_spectral_features(
+                audio_path, duration, mode=spectral_mode, cache_dir=cache_dir
+            )
+            if spec_feat is not None and len(spec_feat) == spectral_dim:
+                features[BASE_DIM:BASE_DIM + spectral_dim] = spec_feat
+        except Exception:
+            pass
 
     return features
 

@@ -58,6 +58,15 @@ mik_db_path: ""                   # z.B. "~/Library/Application Support/MixedInK
 use_learned_offsets: false         # Gelernte Offsets deaktiviert (ML-Predictor ersetzt dies)
 min_corrections: 3                # Mindest-Korrekturen bevor Parameter angepasst wird
 
+# --- Spektral-Features ---
+# Modus fuer akustische Feature-Extraktion (erfordert Audio-Dateien):
+#   off     — Keine Spektral-Features (nur PWAV + Metadata, schnellster Modus)
+#   custom  — Eigene librosa-Features: Band-Energien, Novelty, Onsets (+224 dims)
+#   openl3  — Vortrainierte CNN-Embeddings via torchopenl3 (+512 dims)
+#   auto    — Beide kombiniert, LightGBM waehlt relevante Features (+736 dims)
+spectral_mode: "custom"
+spectral_cache_dir: "data/spectral_cache"
+
 # --- Logging ---
 log_file: "app.log"               # Logdatei (relativ zum Projektverzeichnis, "" = kein File-Log)
 log_level: "INFO"                 # DEBUG, INFO, WARNING, ERROR

@@ -269,6 +269,23 @@ def print_feature_importances(model, name: str, top_n: int = 15):
             names.append("beat_count")
         elif i == 468:
             names.append("bar_count")
+        # --- Spektral-Features (ab Index 469) ---
+        elif 469 <= i < 469 + 32:
+            names.append(f"spec_low_{i - 469}")
+        elif 469 + 32 <= i < 469 + 64:
+            names.append(f"spec_mid_{i - 469 - 32}")
+        elif 469 + 64 <= i < 469 + 96:
+            names.append(f"spec_high_{i - 469 - 64}")
+        elif 469 + 96 <= i < 469 + 128:
+            names.append(f"spec_novelty_{i - 469 - 96}")
+        elif 469 + 128 <= i < 469 + 160:
+            names.append(f"spec_onset_{i - 469 - 128}")
+        elif 469 + 160 <= i < 469 + 192:
+            names.append(f"spec_contrast_{i - 469 - 160}")
+        elif 469 + 192 <= i < 469 + 224:
+            names.append(f"spec_flatness_{i - 469 - 192}")
+        elif 469 + 224 <= i < 469 + 224 + 512:
+            names.append(f"openl3_{i - 469 - 224}")
         else:
             names.append(f"feat_{i}")
 
