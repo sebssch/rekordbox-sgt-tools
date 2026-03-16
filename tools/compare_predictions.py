@@ -352,9 +352,11 @@ def _derive_optimizations(track_results: list[dict]) -> str:
 # Haupt-Logik
 # ---------------------------------------------------------------------------
 
-def main():
+def main(genre_filter: str | None = None, n_tracks: int = 5):
     print("=" * 60)
     print("  AutoCue v27 — Prediction vs. Manuell Vergleich")
+    if genre_filter:
+        print(f"  Genre-Filter: {genre_filter}")
     print("=" * 60)
 
     # 1. Datenbank oeffnen
@@ -391,6 +393,12 @@ def main():
         if hot_a and hot_c:
             bpm = (content.BPM or 0) / 100.0
             if bpm > 0:
+                # Genre-Filter
+                if genre_filter:
+                    g = (getattr(content, 'GenreName', '') or '').lower()
+                    if genre_filter.lower() not in g:
+                        continue
+
                 # MIK-Filter: Nur Tracks mit MIK-Daten
                 from app.mik_scraper import get_mik_data
                 _artist = content.Artist.Name if content.Artist else ""
@@ -407,7 +415,7 @@ def main():
 
     # Sortiert nach BPM, diverse Auswahl
     candidates.sort(key=lambda x: x[0])
-    selected = _pick_diverse(candidates, n=5, bpm_gap=20.0)
+    selected = _pick_diverse(candidates, n=n_tracks, bpm_gap=20.0)
     print(f"   → {len(selected)} Tracks ausgewaehlt (BPM-Diversitaet)")
 
     for c in selected:
@@ -547,4 +555,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--genre", default=None, help="Genre-Filter (substring, case-insensitive)")
+    parser.add_argument("-n", type=int, default=5, help="Anzahl Tracks")
+    args = parser.parse_args()
+    main(genre_filter=args.genre, n_tracks=args.n)

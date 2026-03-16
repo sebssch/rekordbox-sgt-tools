@@ -43,6 +43,10 @@ EXTRA_DIM        = 2    # Beat Count, Bar Count
 
 FEATURE_DIM_FAST = PWAV_DIM + METADATA_DIM + MIK_DIM + PHRASE_DIM + CBR_DIM + EXTRA_DIM  # 469
 
+# Memory Cue Labels: Positionen 2-6 (Index 1-5) — die "inneren" Strukturpositionen
+# Pos 1 = First Downbeat (~0%), Pos 7-10 = Outro-Bereich → Regelsystem reicht
+N_MEM_LABELS     = 5    # Mem-Slot 2 bis 6
+
 
 def _genre_hash(genre: str) -> float:
     """Deterministischer Genre-Hash normalisiert auf [0, 1]."""
@@ -66,11 +70,12 @@ def _get_anlz_paths(content, db_dir: str) -> tuple[str, str] | None:
 
 def extract_labels(db) -> dict[str, dict]:
     """
-    Scannt alle Tracks und extrahiert Hot A + Hot C Positionen.
+    Scannt alle Tracks und extrahiert Hot A + Hot C + Memory Cue Positionen.
     Filtert AutoCue-generierte Cues aus.
 
     Returns: {content_id: {"hot_a_ms": int, "hot_c_ms": int,
                             "hot_a_rel": float, "hot_c_rel": float,
+                            "mem_rel": [float, ...],  # bis zu N_MEM_LABELS
                             "content": obj}}
     """
     labels = {}
@@ -81,8 +86,9 @@ def extract_labels(db) -> dict[str, dict]:
         duration_ms = content.Length * 1000.0
         hot_a_ms = None
         hot_c_ms = None
+        mem_positions: list[float] = []
 
-        for cue in content.Cues:
+        for cue in sorted(content.Cues, key=lambda c: c.InMsec or 0):
             # AutoCue-generierte Cues ueberspringen
             if _cfg.is_autocue_comment(cue.Comment or ""):
                 continue
@@ -90,6 +96,8 @@ def extract_labels(db) -> dict[str, dict]:
                 hot_a_ms = int(cue.InMsec)
             elif cue.Kind == 3 and cue.InMsec is not None:
                 hot_c_ms = int(cue.InMsec)
+            elif cue.Kind == 0 and cue.InMsec is not None:
+                mem_positions.append(cue.InMsec / duration_ms)
 
         if hot_a_ms is not None and hot_c_ms is not None and duration_ms > 0:
             labels[str(content.ID)] = {
@@ -97,6 +105,7 @@ def extract_labels(db) -> dict[str, dict]:
                 "hot_c_ms": hot_c_ms,
                 "hot_a_rel": hot_a_ms / duration_ms,
                 "hot_c_rel": hot_c_ms / duration_ms,
+                "mem_rel": mem_positions[:N_MEM_LABELS + 1],  # +1 weil Index 0 (First Downbeat) uebersprungen wird
                 "content": content,
             }
 
@@ -249,6 +258,7 @@ def export_dataset(mode: str = "fast", output_dir: str = "data/ml") -> dict:
     print(f"\n4. Feature-Extraktion ({mode} mode)...")
     feature_list = []
     label_list = []
+    mem_label_list = []
     meta_out = []
     skipped = 0
 
@@ -267,6 +277,17 @@ def export_dataset(mode: str = "fast", output_dir: str = "data/ml") -> dict:
             )
             feature_list.append(feat)
             label_list.append([lbl["hot_a_rel"], lbl["hot_c_rel"]])
+
+            # Memory Cue Labels: Positionen 2-6 (skip 1. = First Downbeat)
+            mem_rel = lbl.get("mem_rel", [])
+            # Slot 2-6 = Index 1-5 in der Memory-Liste
+            mem_labels = [0.0] * N_MEM_LABELS
+            for i in range(N_MEM_LABELS):
+                idx = i + 1  # Skip index 0 (First Downbeat)
+                if idx < len(mem_rel):
+                    mem_labels[i] = mem_rel[idx]
+            mem_label_list.append(mem_labels)
+
             meta_out.append({
                 "content_id": content_id,
                 "title": content.Title or "",
@@ -275,6 +296,7 @@ def export_dataset(mode: str = "fast", output_dir: str = "data/ml") -> dict:
                 "duration": content.Length or 0,
                 "genre": getattr(content, 'GenreName', '') or '',
                 "key": getattr(content, 'KeyName', '') or '',
+                "n_manual_mem": len(lbl.get("mem_rel", [])),
             })
         except Exception as e:
             skipped += 1
@@ -283,10 +305,12 @@ def export_dataset(mode: str = "fast", output_dir: str = "data/ml") -> dict:
     # 5. Speichern
     X = np.array(feature_list, dtype=np.float32)
     Y = np.array(label_list, dtype=np.float32)
+    Y_mem = np.array(mem_label_list, dtype=np.float32)
 
     os.makedirs(output_dir, exist_ok=True)
     np.save(os.path.join(output_dir, "features_X.npy"), X)
     np.save(os.path.join(output_dir, "labels_Y.npy"), Y)
+    np.save(os.path.join(output_dir, "labels_Y_mem.npy"), Y_mem)
     with open(os.path.join(output_dir, "meta.pkl"), "wb") as f:
         pickle.dump(meta_out, f)
 
@@ -297,11 +321,20 @@ def export_dataset(mode: str = "fast", output_dir: str = "data/ml") -> dict:
     print(f"  Export abgeschlossen in {elapsed:.1f}s")
     print(f"  Tracks: {len(X)} exportiert, {skipped} uebersprungen")
     print(f"  Feature-Shape: {X.shape}")
-    print(f"  Label-Shape: {Y.shape}")
+    print(f"  Label-Shape (Hot): {Y.shape}")
+    print(f"  Label-Shape (Mem): {Y_mem.shape}")
     print(f"  Hot A rel. Position: Median={np.median(Y[:, 0]):.3f}, "
           f"Mean={np.mean(Y[:, 0]):.3f}, Std={np.std(Y[:, 0]):.3f}")
     print(f"  Hot C rel. Position: Median={np.median(Y[:, 1]):.3f}, "
           f"Mean={np.mean(Y[:, 1]):.3f}, Std={np.std(Y[:, 1]):.3f}")
+    # Memory Cue Stats
+    n_with_mem = np.sum(Y_mem[:, 0] > 0)
+    print(f"  Memory Cues: {n_with_mem}/{len(Y_mem)} Tracks mit Mem-Labels")
+    for i in range(N_MEM_LABELS):
+        valid = Y_mem[:, i][Y_mem[:, i] > 0]
+        if len(valid) > 0:
+            print(f"    Slot {i+2}: Median={np.median(valid):.3f}, "
+                  f"N={len(valid)}")
     print(f"  Gespeichert in: {output_dir}/")
     print(f"{'=' * 60}")
 

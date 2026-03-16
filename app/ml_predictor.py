@@ -22,11 +22,15 @@ _MODEL_C_PATH = os.path.join(MODEL_DIR, "ml_hot_c.lgb")
 
 _model_a = None
 _model_c = None
+_mem_models: list = []  # Memory Cue Modelle (Slot 2-6)
+_mem_models_loaded = False
+
+N_MEM_MODELS = 5  # Slot 2 bis 6
 
 
 def _load_models():
     """Laedt LightGBM Modelle (lazy, einmal pro Session)."""
-    global _model_a, _model_c
+    global _model_a, _model_c, _mem_models, _mem_models_loaded
 
     if _model_a is not None and _model_c is not None:
         return True
@@ -40,6 +44,21 @@ def _load_models():
         _model_a = lgb.Booster(model_file=_MODEL_A_PATH)
         _model_c = lgb.Booster(model_file=_MODEL_C_PATH)
         log.info("ML-Modelle geladen: Hot A + Hot C")
+
+        # Memory Cue Modelle laden (optional)
+        if not _mem_models_loaded:
+            _mem_models = []
+            for i in range(N_MEM_MODELS):
+                mem_path = os.path.join(MODEL_DIR, f"ml_mem_{i+2}.lgb")
+                if os.path.exists(mem_path):
+                    _mem_models.append(lgb.Booster(model_file=mem_path))
+                else:
+                    _mem_models.append(None)
+            n_loaded = sum(1 for m in _mem_models if m is not None)
+            if n_loaded > 0:
+                log.info("ML Memory-Modelle geladen: %d/%d", n_loaded, N_MEM_MODELS)
+            _mem_models_loaded = True
+
         return True
     except Exception as e:
         log.warning("ML-Modelle laden fehlgeschlagen: %s", e)
@@ -97,10 +116,22 @@ def predict_cue_positions(content, dat_path: str, ext_path: str,
     hot_a_sec = snap_to_downbeat(hot_a_sec, grid)
     hot_c_sec = snap_to_downbeat(hot_c_sec, grid)
 
+    # Memory Cue Predictions (Slot 2-6)
+    memory_times: list[float] = []
+    if _mem_models:
+        for model in _mem_models:
+            if model is None:
+                continue
+            pred_rel = float(model.predict(X)[0])
+            pred_rel = max(0.0, min(1.0, pred_rel))
+            if pred_rel > 0.01:  # Nur gueltige Positionen
+                mem_sec = snap_to_downbeat(pred_rel * duration, grid)
+                memory_times.append(mem_sec)
+
     return {
         "hot_a": [hot_a_sec],
         "hot_c": [hot_c_sec],
-        "memory": [],
+        "memory": memory_times,
     }
 
 

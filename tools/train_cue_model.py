@@ -37,13 +37,17 @@ N_ESTIMATORS = 500
 EARLY_STOPPING = 50
 
 
+N_MEM_MODELS = 5  # Memory-Slot 2 bis 6
+
 def load_dataset(data_dir: str = DATA_DIR):
     """Laedt exportierte Features, Labels, Metadata."""
     X = np.load(os.path.join(data_dir, "features_X.npy"))
     Y = np.load(os.path.join(data_dir, "labels_Y.npy"))
+    Y_mem_path = os.path.join(data_dir, "labels_Y_mem.npy")
+    Y_mem = np.load(Y_mem_path) if os.path.exists(Y_mem_path) else None
     with open(os.path.join(data_dir, "meta.pkl"), "rb") as f:
         meta = pickle.load(f)
-    return X, Y, meta
+    return X, Y, meta, Y_mem
 
 
 def rel_to_beats(delta_rel: float, duration: float, bpm: float) -> float:
@@ -149,6 +153,80 @@ def train_final_models(X: np.ndarray, Y: np.ndarray) -> tuple:
     return model_a, model_c
 
 
+def train_memory_models(X: np.ndarray, Y_mem: np.ndarray) -> list:
+    """
+    Trainiert Memory-Cue-Modelle fuer Slot 2-6 (5 Regressoren).
+    Nur Tracks mit tatsaechlichen Memory Cues an dieser Position verwenden.
+    """
+    models = []
+    for i in range(N_MEM_MODELS):
+        # Nur Tracks mit gueltigen Labels (> 0) fuer diesen Slot
+        mask = Y_mem[:, i] > 0.01  # > 1% Position = gueltig
+        X_valid = X[mask]
+        y_valid = Y_mem[:, i][mask]
+
+        if len(X_valid) < 100:
+            print(f"    Mem Slot {i+2}: zu wenig Daten ({len(X_valid)}), uebersprungen")
+            models.append(None)
+            continue
+
+        ds = lgb.Dataset(X_valid, label=y_valid)
+        model = lgb.train(LGB_PARAMS, ds, N_ESTIMATORS)
+        models.append(model)
+        print(f"    Mem Slot {i+2}: {len(X_valid)} Tracks, trainiert")
+
+    return models
+
+
+def cv_memory_models(X: np.ndarray, Y_mem: np.ndarray, meta: list,
+                     n_folds: int = 5) -> dict:
+    """Cross-Validation fuer Memory-Cue-Modelle."""
+    kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+    results = {}
+
+    for slot in range(N_MEM_MODELS):
+        mask = Y_mem[:, slot] > 0.01
+        X_valid = X[mask]
+        y_valid = Y_mem[:, slot][mask]
+        meta_valid = [meta[i] for i, m in enumerate(mask) if m]
+
+        if len(X_valid) < 100:
+            continue
+
+        deltas = []
+        bl_deltas = []
+
+        for train_idx, val_idx in kf.split(X_valid):
+            X_tr, X_vl = X_valid[train_idx], X_valid[val_idx]
+            y_tr, y_vl = y_valid[train_idx], y_valid[val_idx]
+            meta_vl = [meta_valid[i] for i in val_idx]
+
+            baseline = float(np.median(y_tr))
+
+            ds_tr = lgb.Dataset(X_tr, label=y_tr)
+            ds_vl = lgb.Dataset(X_vl, label=y_vl, reference=ds_tr)
+            model = lgb.train(
+                LGB_PARAMS, ds_tr, N_ESTIMATORS,
+                valid_sets=[ds_vl],
+                callbacks=[lgb.early_stopping(EARLY_STOPPING), lgb.log_evaluation(0)],
+            )
+            pred = model.predict(X_vl)
+
+            for j in range(len(X_vl)):
+                dur = meta_vl[j]["duration"]
+                bpm = meta_vl[j]["bpm"]
+                deltas.append(rel_to_beats(pred[j] - y_vl[j], dur, bpm))
+                bl_deltas.append(rel_to_beats(baseline - y_vl[j], dur, bpm))
+
+        results[f"mem_{slot+2}"] = {
+            "ml": np.array(deltas),
+            "baseline": np.array(bl_deltas),
+            "n_tracks": len(X_valid),
+        }
+
+    return results
+
+
 def print_feature_importances(model, name: str, top_n: int = 15):
     """Zeigt die wichtigsten Features."""
     importance = model.feature_importance(importance_type="gain")
@@ -207,15 +285,32 @@ def main():
 
     # 1. Daten laden
     print("\n1. Daten laden...")
-    X, Y, meta = load_dataset()
+    X, Y, meta, Y_mem = load_dataset()
     print(f"   {X.shape[0]} Tracks, {X.shape[1]} Features")
     print(f"   Hot A rel: {np.mean(Y[:, 0]):.3f} ± {np.std(Y[:, 0]):.3f}")
     print(f"   Hot C rel: {np.mean(Y[:, 1]):.3f} ± {np.std(Y[:, 1]):.3f}")
+    if Y_mem is not None:
+        print(f"   Memory Labels: {Y_mem.shape}")
 
-    # 2. Cross-Validation
-    print("\n2. 5-Fold Cross-Validation...")
+    # 2. Cross-Validation (Hot Cues)
+    print("\n2. 5-Fold Cross-Validation (Hot Cues)...")
     results = cross_validate(X, Y, meta)
     print_results(results)
+
+    # 2b. Cross-Validation (Memory Cues)
+    if Y_mem is not None:
+        print("\n2b. 5-Fold Cross-Validation (Memory Cues)...")
+        mem_results = cv_memory_models(X, Y_mem, meta)
+        for slot_name, res in mem_results.items():
+            ml_mae = np.mean(res["ml"])
+            bl_mae = np.mean(res["baseline"])
+            within_8 = np.mean(res["ml"] <= 8.0) * 100
+            improvement = (bl_mae - ml_mae) / bl_mae * 100
+            print(f"    {slot_name}: ML MAE={ml_mae:.1f}b  "
+                  f"Baseline={bl_mae:.1f}b  "
+                  f"±8b={within_8:.1f}%  "
+                  f"Verbesserung={improvement:+.1f}%  "
+                  f"(N={res['n_tracks']})")
 
     # 3. Finale Modelle trainieren
     print("\n3. Finale Modelle trainieren (gesamter Datensatz)...")
@@ -225,16 +320,26 @@ def main():
     print_feature_importances(model_a, "Hot A")
     print_feature_importances(model_c, "Hot C")
 
-    # 5. Speichern
+    # 5. Speichern (Hot Cue Modelle)
     os.makedirs(MODEL_DIR, exist_ok=True)
     model_a.save_model(os.path.join(MODEL_DIR, "ml_hot_a.lgb"))
     model_c.save_model(os.path.join(MODEL_DIR, "ml_hot_c.lgb"))
-    print(f"\n  Modelle gespeichert: {MODEL_DIR}/ml_hot_a.lgb, ml_hot_c.lgb")
+    print(f"\n  Hot Cue Modelle gespeichert: {MODEL_DIR}/ml_hot_a.lgb, ml_hot_c.lgb")
 
-    # Modellgroesse
     a_size = os.path.getsize(os.path.join(MODEL_DIR, "ml_hot_a.lgb"))
     c_size = os.path.getsize(os.path.join(MODEL_DIR, "ml_hot_c.lgb"))
     print(f"  Hot A: {a_size / 1024:.0f} KB  |  Hot C: {c_size / 1024:.0f} KB")
+
+    # 5b. Memory Cue Modelle trainieren und speichern
+    if Y_mem is not None:
+        print("\n  Memory Cue Modelle trainieren...")
+        mem_models = train_memory_models(X, Y_mem)
+        for i, model in enumerate(mem_models):
+            if model is not None:
+                path = os.path.join(MODEL_DIR, f"ml_mem_{i+2}.lgb")
+                model.save_model(path)
+                size = os.path.getsize(path) / 1024
+                print(f"    ml_mem_{i+2}.lgb: {size:.0f} KB")
 
     print(f"\n{'=' * 60}")
 

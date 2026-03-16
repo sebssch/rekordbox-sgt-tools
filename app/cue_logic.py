@@ -708,14 +708,15 @@ def generate_cues(
                 priority=3,
             ))
 
-    # PWAV-Memory als zusaetzliche Anker (Priority 4, nach MIK)
+    # ML-Memory als zusaetzliche Anker (Priority 3, gleichwertig mit MIK-Ankern)
+    # Trainiert auf 5000+ manuell kuratierte Tracks → zuverlässige Strukturpositionen
     if pwav_memory:
         for pm_t in pwav_memory:
             snapped = snap_to_downbeat(pm_t, grid)
             if not any(abs(snapped - c.time_sec) < beat_dur * 8 for c in memory_cues):
                 memory_cues.append(CuePoint(
-                    time_sec=snapped, kind=0, name="PWAV",
-                    comment="PWAV Predicted", priority=4,
+                    time_sec=snapped, kind=0, name="ML",
+                    comment="ML Structure", priority=3,
                 ))
 
     hot_times = [t for t in [hot_a_time, hot_b_time, hot_c_time] if t is not None]

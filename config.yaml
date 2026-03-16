@@ -29,6 +29,13 @@ phrase_match_tolerance_beats: 2
 # Automatische Korrektur-Schwelle: Gelernte Offsets werden angewendet wenn Konfidenz > N%
 auto_correction_confidence_threshold: 0.80
 
+# --- Konfidenz-Filter ---
+# Minimale Konfidenz (0.0 - 1.0) um einen Hot Cue zu setzen.
+# Unter diesem Wert wird der Cue uebersprungen (lieber keine als falsche Cues).
+# 0.0 = deaktiviert (alles setzen), 0.4 = mind. 2 Quellen oder 1 Quelle + ML nah
+# Empfehlung: 0.4 fuer konservativ, 0.3 fuer moderat, 0.0 fuer maximal
+min_confidence: 0.4
+
 # --- Cue Farben (Rekordbox Farbcodes, -1 = Standard/keine Farbe) ---
 # Bekannte Rekordbox Farbcodes: -1 (keine), 122 (rot), 63 (orange), 114 (gelb),
 #                                39 (grün), 9 (türkis), 5 (blau), 17 (lila)

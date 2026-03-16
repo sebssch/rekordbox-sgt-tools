@@ -76,6 +76,58 @@ def _closest_within(candidate: float, targets: list[float],
     return best if best_dist <= tol_beats else None
 
 
+def _compute_confidence(
+    chosen: float,
+    sources: list[str],
+    ml_candidate: float | None,
+    cbr_candidate: float | None,
+    grid: BeatGrid,
+    duration: float,
+) -> float:
+    """
+    Berechnet einen Konfidenz-Score (0.0 - 1.0) fuer eine Cue-Entscheidung.
+
+    Faktoren:
+      - Quellen-Anzahl: 2+ Quellen = 0.5 Basis, 1 Quelle = 0.25 Basis
+      - ML-Naehe: Wenn ML-Prediction existiert und nah dran → Bonus
+      - CBR-Naehe: Wenn CBR existiert und nah dran → Bonus
+    """
+    beat_dur = 60.0 / max(grid.bpm, 1.0)
+
+    # Basis: Quellen-Anzahl
+    n_sources = len(sources)
+    if n_sources >= 2:
+        conf = 0.5
+    elif n_sources == 1:
+        conf = 0.25
+    else:
+        return 0.0
+
+    # Bonus fuer MIK×Phrase (klassischer Konsens, hoechste Zuverlaessigkeit)
+    if "mik" in sources and "phrase" in sources:
+        conf += 0.15
+
+    # ML-Naehe Bonus (max +0.25)
+    if ml_candidate is not None and duration > 0:
+        ml_dist_beats = abs(chosen - ml_candidate) / beat_dur
+        if ml_dist_beats <= 4:
+            conf += 0.25  # ML sehr nah → hohe Konfidenz
+        elif ml_dist_beats <= 16:
+            conf += 0.15  # ML relativ nah
+        elif ml_dist_beats <= 32:
+            conf += 0.05  # ML im Bereich
+
+    # CBR-Naehe Bonus (max +0.10)
+    if cbr_candidate is not None and duration > 0:
+        cbr_dist_beats = abs(chosen - cbr_candidate) / beat_dur
+        if cbr_dist_beats <= 8:
+            conf += 0.10
+        elif cbr_dist_beats <= 16:
+            conf += 0.05
+
+    return min(1.0, conf)
+
+
 def _check_hot_a_constraints(t: float,
                                hot_b_time: float | None,
                                hot_c_time: float | None,
@@ -159,8 +211,22 @@ def validate_hot_a(
                 if _check_hot_a_constraints(mik_t, hot_b_time, hot_c_time, grid):
                     _mik_ml_matches.append((mik_t, ["mik", "pwav"]))
 
+    # Phrase×ML Matches (funktioniert auch ohne MIK-Daten)
+    _phrase_ml_matches: list[tuple[float, list[str]]] = []
+    if pwav_candidates:
+        _pwav_t = pwav_candidates[0]
+        for ph_t in phrase_adj:
+            # Kein Duplikat wenn bereits in MIK×Phrase oder MIK×ML
+            if any(abs(ph_t - mp[0]) < 0.1 for mp in _mik_phrase_matches):
+                continue
+            if any(abs(ph_t - mp[0]) < 0.1 for mp in _mik_ml_matches):
+                continue
+            if _closest_within(_pwav_t, [ph_t], grid, tol * 4) is not None:
+                if _check_hot_a_constraints(ph_t, hot_b_time, hot_c_time, grid):
+                    _phrase_ml_matches.append((ph_t, ["phrase", "pwav"]))
+
     # Alle Kandidaten zusammenfuehren
-    _all_candidates = _mik_phrase_matches + _mik_ml_matches
+    _all_candidates = _mik_phrase_matches + _mik_ml_matches + _phrase_ml_matches
 
     if _all_candidates:
         if len(_all_candidates) == 1:
@@ -277,11 +343,25 @@ def validate_hot_a(
             action="skip", comment="",
         )
 
-    _n_sources = 4.0  # Quad-Check: MIK, Phrase, Library, PWAV
+    # Konfidenz berechnen
+    _ml_t = pwav_candidates[0] if pwav_candidates else None
+    _cbr_t = (cbr_candidate + offset_sec) if cbr_candidate is not None else None
+    conf = _compute_confidence(chosen, sources, _ml_t, _cbr_t, grid, duration)
+
+    # Schwellwert-Check: unter min_confidence → lieber nichts setzen
+    _min_conf = float(_cfg.get("min_confidence", 0.0))
+    if _min_conf > 0 and conf < _min_conf:
+        return CueDecision(
+            kind=1, time_sec=None, confidence=conf, sources=sources,
+            rule_ok=True,
+            reason=f"Low Confidence: {conf:.2f} < {_min_conf:.2f} ({'+'.join(s.upper() for s in sources)})",
+            action="skip", comment="",
+        )
+
     return CueDecision(
-        kind=1, time_sec=chosen, confidence=len(sources) / _n_sources,
+        kind=1, time_sec=chosen, confidence=conf,
         sources=sources, rule_ok=True,
-        reason=f"Konsens: {'+'.join(s.upper() for s in sources)}",
+        reason=f"Konsens: {'+'.join(s.upper() for s in sources)} (conf={conf:.2f})",
         action="set", comment="The Break",
     )
 
@@ -335,6 +415,19 @@ def validate_hot_c(
         else:
             chosen = _pool[-1]  # Letzten (spaetesten) nicht-Outro Drop nehmen
         sources = ["mik", "phrase"]
+
+    # --- Stufe 1b: Phrase × ML (funktioniert auch ohne MIK) ---
+    if chosen is None and pwav_candidates and phrase_adj:
+        _phrase_ml_c: list[float] = []
+        for pwav_t in pwav_candidates:
+            phrase_match = _closest_within(pwav_t, phrase_adj, grid, tol * 4)
+            if phrase_match is not None:
+                _phrase_ml_c.append(phrase_match)
+        if _phrase_ml_c:
+            _non_outro_pml = [t for t in _phrase_ml_c if t < _outro_thresh]
+            _pool_pml = _non_outro_pml if _non_outro_pml else _phrase_ml_c
+            chosen = _pool_pml[-1]
+            sources = ["phrase", "pwav"]
 
     # --- Stufe 1.5: PWAV × MIK oder PWAV × Phrase (vor CBR) ---
     # Nur fuer Hot C: Modell-Accuracy 71% bei ±8 Beats
@@ -437,11 +530,25 @@ def validate_hot_c(
             action="skip", comment="",
         )
 
-    _n_sources = 4.0  # Quad-Check
+    # Konfidenz berechnen
+    _ml_t = pwav_candidates[0] if pwav_candidates else None
+    _cbr_t = (cbr_candidate + offset_sec) if cbr_candidate is not None else None
+    conf = _compute_confidence(chosen, sources, _ml_t, _cbr_t, grid, duration)
+
+    # Schwellwert-Check
+    _min_conf = float(_cfg.get("min_confidence", 0.0))
+    if _min_conf > 0 and conf < _min_conf:
+        return CueDecision(
+            kind=3, time_sec=None, confidence=conf, sources=sources,
+            rule_ok=True,
+            reason=f"Low Confidence: {conf:.2f} < {_min_conf:.2f} ({'+'.join(s.upper() for s in sources)})",
+            action="skip", comment="",
+        )
+
     return CueDecision(
-        kind=3, time_sec=chosen, confidence=len(sources) / _n_sources,
+        kind=3, time_sec=chosen, confidence=conf,
         sources=sources, rule_ok=True,
-        reason=f"Konsens: {'+'.join(s.upper() for s in sources)}",
+        reason=f"Konsens: {'+'.join(s.upper() for s in sources)} (conf={conf:.2f})",
         action="set", comment="The Last Drop",
     )
 
