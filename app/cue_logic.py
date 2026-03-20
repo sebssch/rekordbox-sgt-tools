@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from app.beatgrid import (
     BeatGrid,
     snap_to_downbeat,
+    snap_to_phrase_boundary,
     get_time_n_beats_before,
     get_time_n_beats_after,
     get_beat_index_at_time,
@@ -692,27 +693,17 @@ def generate_cues(
     # ============================================
     # 4. Memory Cues (max 10, priorisiert)
     # ============================================
-    memory_cues = _generate_memory_cues(analysis, cue_spacing=cue_spacing)
+    memory_cues = _generate_memory_cues(analysis, phrases=phrases,
+                                        cue_spacing=cue_spacing)
 
-    # Restliche MIK-Cues → Memory-Anker (Prio 3)
-    if mik_spots:
-        for mik_t in mik_spots:
-            if round(mik_t, 2) in used_mik_times:
-                continue
-            snapped_mik = snap_to_downbeat(mik_t, grid)
-            memory_cues.append(CuePoint(
-                time_sec=snapped_mik,
-                kind=0,
-                name="MIK",
-                comment="MIK Anchor",
-                priority=3,
-            ))
+    # MIK-Cues werden fuer Memory Cues NICHT mehr verwendet (v27.2).
+    # Nur ML-Anker und Phrasen/Segmente bestimmen die Strukturierung.
 
-    # ML-Memory als zusaetzliche Anker (Priority 3, gleichwertig mit MIK-Ankern)
+    # ML-Memory als zusaetzliche Anker (Priority 3)
     # Trainiert auf 5000+ manuell kuratierte Tracks → zuverlässige Strukturpositionen
     if pwav_memory:
         for pm_t in pwav_memory:
-            snapped = snap_to_downbeat(pm_t, grid)
+            snapped = snap_to_phrase_boundary(pm_t, grid, n_beats=cue_spacing)
             if not any(abs(snapped - c.time_sec) < beat_dur * 8 for c in memory_cues):
                 memory_cues.append(CuePoint(
                     time_sec=snapped, kind=0, name="ML",
@@ -742,17 +733,19 @@ def generate_cues(
 # --- Memory Cue Generierung mit Priorisierung ---
 
 def _generate_memory_cues(analysis: TrackAnalysis,
+                           phrases: list[PhraseSegment] | None = None,
                            cue_spacing: int = 32) -> list[CuePoint]:
     """
-    Generiert Memory Cues mit Prioritaets-System:
+    Generiert Memory Cues mit Prioritaets-System (v27.2):
       Prio 1: Erster Downbeat
       Prio 2: Intro-Struktur (32-Beat-Schritte)
-      Prio 3: Primaere Ankerpunkte (First Drop, Second Break)
-      Prio 4: Phrasen-Uebergaenge (32b nach/vor Wechseln)
+      Prio 3: Primaere Ankerpunkte (First Drop, Second Break) — 32-Beat-Grid
+      Prio 4: Phrasen-Uebergaenge (PSSI-Phrasen primaer, Segment-Fallback) — 32-Beat-Grid
       Prio 5: Outro-Struktur (KEIN letzter Schlag)
 
-    Jeder Cue bekommt eine Prioritaet. Bei Ueberschreitung des
-    10-Cue-Limits werden niedrig-priorisierte Cues entfernt.
+    Alle Struktur-Cues (Prio 3+4) werden auf das 32-Beat-Grid gesnappt,
+    sodass sie konsistente Abstande zum Track-Raster haben.
+    MIK-Daten werden NICHT fuer Memory Cues verwendet.
     """
     grid = analysis.grid
     segments = analysis.segments
@@ -793,10 +786,10 @@ def _generate_memory_cues(analysis: TrackAnalysis,
             beat += cue_spacing
             step += 1
 
-    # ---- Prio 3: Primaere Ankerpunkte (First Drop, Second Break) ----
+    # ---- Prio 3: Primaere Ankerpunkte (32-Beat-Grid) ----
     first_drop = _find_first_drop(segments)
     if first_drop:
-        t = snap_to_downbeat(first_drop.start_time, grid)
+        t = snap_to_phrase_boundary(first_drop.start_time, grid, n_beats=cue_spacing)
         cues.append(CuePoint(
             time_sec=t,
             kind=0,
@@ -807,7 +800,7 @@ def _generate_memory_cues(analysis: TrackAnalysis,
 
     second_break = _find_second_break(segments)
     if second_break:
-        t = snap_to_downbeat(second_break.start_time, grid)
+        t = snap_to_phrase_boundary(second_break.start_time, grid, n_beats=cue_spacing)
         cues.append(CuePoint(
             time_sec=t,
             kind=0,
@@ -816,29 +809,47 @@ def _generate_memory_cues(analysis: TrackAnalysis,
             priority=3,
         ))
 
-    # ---- Prio 4: Phrasen-Uebergaenge (Segment-Grenzen) ----
-    for i, seg in enumerate(segments):
-        if seg.kind in ("intro", "outro"):
-            continue
-        if i == 0:
-            continue
-
-        # Nicht First Drop / Second Break doppelt zaehlen
-        t = snap_to_downbeat(seg.start_time, grid)
-        already_exists = any(
-            abs(c.time_ms - int(round(t * 1000))) <= 500
-            for c in cues
-        )
-        if already_exists:
-            continue
-
-        cues.append(CuePoint(
-            time_sec=t,
-            kind=0,
-            name=f"Phrase {i}",
-            comment=f"{seg.kind.capitalize()} Start",
-            priority=4,
-        ))
+    # ---- Prio 4: Phrasen-Uebergaenge (PSSI primaer, Segment-Fallback) ----
+    # PSSI-Phrasen direkt nutzen wenn vorhanden (exakte Rekordbox-Analyse)
+    if phrases:
+        for i, p in enumerate(phrases):
+            if p.kind_name in ("Intro", "Outro"):
+                continue
+            t = snap_to_phrase_boundary(p.time_start_sec, grid, n_beats=cue_spacing)
+            already_exists = any(
+                abs(c.time_ms - int(round(t * 1000))) <= 500
+                for c in cues
+            )
+            if already_exists:
+                continue
+            cues.append(CuePoint(
+                time_sec=t,
+                kind=0,
+                name=f"Phrase {i + 1}",
+                comment=f"{p.kind_name} Start",
+                priority=4,
+            ))
+    else:
+        # Fallback: akustische Segmente wenn keine PSSI-Phrasen
+        for i, seg in enumerate(segments):
+            if seg.kind in ("intro", "outro"):
+                continue
+            if i == 0:
+                continue
+            t = snap_to_phrase_boundary(seg.start_time, grid, n_beats=cue_spacing)
+            already_exists = any(
+                abs(c.time_ms - int(round(t * 1000))) <= 500
+                for c in cues
+            )
+            if already_exists:
+                continue
+            cues.append(CuePoint(
+                time_sec=t,
+                kind=0,
+                name=f"Phrase {i}",
+                comment=f"{seg.kind.capitalize()} Start",
+                priority=4,
+            ))
 
     # ---- Prio 5: Outro-Struktur (KEIN letzter Schlag) ----
     if outro:
@@ -848,19 +859,15 @@ def _generate_memory_cues(analysis: TrackAnalysis,
             grid.count - 1
         )
 
-        # Outro-Cues: alle N Beats, aber NICHT bis zum absoluten Ende
-        # Stoppe mindestens cue_spacing Beats vor Track-Ende
-        # (kein Cue am "letzten Schlag")
         safe_end_beat = outro_end_beat - cue_spacing
         if safe_end_beat <= outro_start_beat:
-            safe_end_beat = outro_end_beat  # Sehr kurzes Outro: 1 Cue erlauben
+            safe_end_beat = outro_end_beat
 
         beat = outro_start_beat
         step = 0
         while beat <= safe_end_beat and beat < grid.count:
             t = get_time_at_beat(beat, grid)
 
-            # Letzten Schlag ueberspringen
             if beat >= grid.count - 4:
                 break
 

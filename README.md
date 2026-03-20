@@ -1,4 +1,4 @@
-# Rekordbox AutoCue v27.2
+# Rekordbox AutoCue v27.3
 
 > ML-basierte Cue-Point-Vorhersage fuer Rekordbox — lernt aus deinen ~5.000 Tracks.
 
@@ -32,9 +32,10 @@ Hot Cue C  →  "The Last Drop" — Letzter Drop (Segment + Visual Edge)
 Memory Cues (max. 10):
   Prio 1 — Erster Downbeat
   Prio 2 — Intro-Struktur (alle 32 Beats)
-  Prio 3 — MIK-Anker + First Drop, Second Break
-  Prio 4 — ML-Vorhersagen + weitere Phrasen-Uebergaenge
+  Prio 3 — First Drop, Second Break + ML-Anker (32-Beat-Grid)
+  Prio 4 — PSSI-Phrasen-Uebergaenge (32-Beat-Grid, Segment-Fallback)
   Prio 5 — Outro-Struktur (nie am letzten Schlag, mind. 32 Beats vor Track-Ende)
+  MIK-Daten werden fuer Memory Cues NICHT verwendet (nur Hot Cues).
 ```
 
 Constraints:
@@ -319,6 +320,7 @@ Top Feature Importances (Spektral):
 | `v27` | Quad-Check + LightGBM ML trainiert auf 4.430 Tracks |
 | `v27.1` | Memory Cue ML-Modelle (Slot 2-6), Konfidenz-Scoring, Phrase×ML Source |
 | `v27.2` | Spektral-Features: Mel-Spektrogramm-Analyse (7 Features x 32 Segmente = +224 dims) |
+| `v27.3` | Memory Cues: 32-Beat-Grid-Snapping, PSSI-Phrasen primaer, MIK entfernt |
 
 ---
 
