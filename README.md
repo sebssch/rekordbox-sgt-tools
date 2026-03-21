@@ -1,8 +1,11 @@
-# [Rekordbox](https://rekordbox.com/de/) AutoCue v28.1
+# Rekordbox AutoCue v28.1
 
-> ML-basierte Cue-Point-Vorhersage fuer [Rekordbox](https://rekordbox.com/de/) — lernt aus deinen ~5.000 Tracks.
+> ML-basierte Cue-Point-Vorhersage fuer Rekordbox — lernt aus deinen Tracks.
 
-AutoCue analysiert deine Tracks akustisch (Spektrogramm + Waveform), nutzt [Mixed In Key](https://mixedinkey.com/)-Daten und ein LightGBM-Modell trainiert auf deiner Bibliothek — vollautomatisch, ohne Rekordbox-Cloud.
+AutoCue analysiert deine Tracks akustisch (Spektrogramm + Waveform), nutzt Mixed In Key-Daten und ein LightGBM-Modell trainiert auf deiner Bibliothek — vollautomatisch, ohne Rekordbox-Cloud.
+
+<!-- TODO: Screenshot einfuegen -->
+<!-- ![AutoCue Terminal](images/terminal.png) -->
 
 ---
 
@@ -11,14 +14,14 @@ AutoCue analysiert deine Tracks akustisch (Spektrogramm + Waveform), nutzt [Mixe
 | Feature | Beschreibung |
 |---------|-------------|
 | **Beatgrid-Sync** | Cues snappen exakt auf Downbeats via ANLZ-Beatgrid |
-| **Quad-Check (v28)** | Jeder Hot Cue unabhaengig validiert: MIK x Phrase x Library x ML |
-| **LightGBM ML (v27+)** | Supervised Learning auf 4.430 Tracks, 693-dim Feature-Vektor |
-| **Spektral-Features (v28)** | Mel-Spektrogramm-Analyse: Band-Energien, Novelty, Onset, Contrast, Flatness |
-| **Memory Cue Engine (v28.1)** | Phrasen-basierte Memory Cues: Intro/Outro-Gliederung + Strukturmitte |
-| **PSSI-Phrasen** | [Rekordbox](https://rekordbox.com/de/)-Phrase-Analyse aus ANLZ .EXT-Dateien (Intro/Drop/Break/Outro) |
+| **Quad-Check** | Jeder Hot Cue unabhaengig validiert: MIK x Phrase x Library x ML |
+| **LightGBM ML** | Supervised Learning, 693-dim Feature-Vektor |
+| **Spektral-Features** | Mel-Spektrogramm-Analyse: Band-Energien, Novelty, Onset, Contrast, Flatness |
+| **Memory Cue Engine** | Phrasen-basierte Memory Cues: Intro/Outro-Gliederung + Strukturmitte |
+| **PSSI-Phrasen** | Rekordbox-Phrase-Analyse aus ANLZ .EXT-Dateien (Intro/Drop/Break/Outro) |
 | **Akustische Segmentierung** | SSM + Novelty + Energy + Percussive Ratio |
 | **Datenbank-Backup** | Automatisches Backup der Rekordbox-DB vor jeder Aenderung (max. 5 Backups) |
-| **[Mixed In Key](https://mixedinkey.com/)-Integration** | Mixed In Key Cue-Positionen als primaere Hotspots (ID3-Tags + SQLite) |
+| **Mixed In Key-Integration** | Mixed In Key Cue-Positionen als zusaetzliche Quelle (optional, nicht erforderlich) |
 | **CBR (5k-Brain)** | Case-Based Reasoning — findet Zwillings-Tracks aus deiner Sammlung |
 | **Konfigurierbar** | Alle Parameter in `config.yaml`, kein Hardcoding |
 
@@ -34,7 +37,10 @@ Hot Cue B  →  "The Setup"     — Exakt N Beats vor Hot C (Default: 32 Beats)
 Hot Cue C  →  "The Last Drop" — Letzter Drop (Segment + Visual Edge)
 ```
 
-### Memory Cues (v28.1)
+<!-- TODO: Screenshot Rekordbox mit Hot Cues -->
+<!-- ![Hot Cues in Rekordbox](images/hot_cues.png) -->
+
+### Memory Cues
 
 Memory Cues gliedern die Track-Struktur relativ zu den Hot Cues:
 
@@ -61,6 +67,9 @@ ML-Cues nur als Validierung: "(ML)" im Comment wenn ML uebereinstimmt.
 MIK-Daten werden fuer Memory Cues NICHT verwendet.
 ```
 
+<!-- TODO: Screenshot Memory Cues in Rekordbox -->
+<!-- ![Memory Cues](images/memory_cues.png) -->
+
 ### Constraints
 
 - Hot A ↔ Hot B: mind. 128 Beats (32 Bars) Abstand
@@ -76,7 +85,25 @@ MIK-Daten werden fuer Memory Cues NICHT verwendet.
 - macOS 13+ (Apple Silicon oder Intel)
 - Python 3.12+
 - [Rekordbox](https://rekordbox.com/de/) 6.x oder 7.x installiert und konfiguriert
-- [Mixed In Key](https://mixedinkey.com/) 11 *(optional — fuer MIK Cue-Integration)*
+- [Mixed In Key](https://mixedinkey.com/) 11 *(optional — das Skript laeuft auch ohne MIK)*
+
+---
+
+## Rekordbox Datenbank
+
+AutoCue liest und schreibt direkt in die Rekordbox `master.db`. Der Standard-Pfad unter macOS:
+
+```
+~/Library/Pioneer/rekordbox/master.db
+```
+
+Dieser Pfad kann in `config.yaml` ueberschrieben werden:
+
+```yaml
+rekordbox_db_path: "~/Library/Pioneer/rekordbox/master.db"
+```
+
+> **Sicherheit:** Vor jeder Live-Aenderung wird automatisch ein Backup erstellt (`master.db.backup_YYYYMMDD_HHMMSS`). Es werden maximal 5 Backups aufbewahrt — aeltere werden automatisch geloescht.
 
 ---
 
@@ -105,9 +132,6 @@ brew install libomp
 Alle Parameter werden in `config.yaml` gesteuert:
 
 ```yaml
-# Version
-version: "28.1"
-
 # Cue-Prefix — erscheint in Rekordbox als Cue-Label
 cue_prefix: "A:"               # z.B. "A: The Break", "A: The Last Drop"
 
@@ -126,6 +150,9 @@ use_learned_offsets: false       # Gelernte Offsets deaktiviert (ML-Predictor er
 # Spektral-Features
 spectral_mode: "custom"         # "custom" | "openl3" | "auto" | "off"
 spectral_cache_dir: "data/spectral_cache"
+
+# Rekordbox Datenbank (leer = macOS-Standard)
+rekordbox_db_path: ""
 
 # Playlist die analysiert werden soll
 analyse_playlist: "--analyse-tracks"
@@ -158,32 +185,21 @@ Ergebnis: `app/data/track_vectors.npz` + `app/data/track_meta.pkl`
 ### 3. ML-Modell trainieren (einmalig / nach grossen Aenderungen)
 
 Trainiert LightGBM-Regressoren auf deinen manuell gesetzten Hot Cues.
-Nutzt PWAV-Waveforms, MIK-Daten, PSSI-Phrasen, Spektral-Features und CBR-Twin-Positionen.
+Nutzt PWAV-Waveforms, PSSI-Phrasen, Spektral-Features, CBR-Twin-Positionen und optional MIK-Daten.
 
 ```bash
 source .venv/bin/activate
 
-# Schritt 1: Trainingsdaten exportieren (~17 Minuten fuer 4.430 Tracks, danach Cache)
+# Schritt 1: Trainingsdaten exportieren (beim ersten Mal ~17 Minuten, danach Cache)
 python tools/export_training_data.py --spectral custom
-# → data/ml/features_X.npy  (4430, 693)
-# → data/ml/labels_Y.npy    (4430, 2)
-# → data/ml/labels_mem_Y.npy (4430, 5)
-# → data/ml/meta.pkl
-# → data/spectral_cache/     (gecachte Spektral-Features)
 
 # Schritt 2: Modelle trainieren + Cross-Validation
 python tools/train_cue_model.py
-# → models/ml_hot_a.lgb     (~3 MB)
-# → models/ml_hot_c.lgb     (~3 MB)
-# → models/ml_mem_2..6.lgb  (~3 MB je)
-# → 5-Fold CV mit Beat-Accuracy Metriken
 ```
 
 Ohne trainiertes Modell: automatischer Fallback auf Triple-Check (kein Fehler, kein Abbruch).
 
 ### 4. Analyse starten
-
-> **Sicherheit:** Vor jeder Live-Aenderung wird automatisch ein Backup der [Rekordbox](https://rekordbox.com/de/)-Datenbank (`master.db`) erstellt. Es werden maximal 5 Backups aufbewahrt — aeltere werden automatisch geloescht. Backup-Pfad: neben der `master.db` als `master.db.backup_YYYYMMDD_HHMMSS`.
 
 ```bash
 source .venv/bin/activate
@@ -210,7 +226,6 @@ Vergleicht die Vorhersagen gegen manuell gesetzte Hot Cues (Dry-Run, keine DB-Ae
 
 ```bash
 python tools/compare_predictions.py
-# → tools/compare_report.md
 ```
 
 ### 6. Terminal-Ausgabe
@@ -228,6 +243,9 @@ python tools/compare_predictions.py
     Mem    [4:26.08]  Bar 133  — Chorus Start           (orange)
     Mem    [7:02.04]  Bar 211  — Outro +32b             (orange)
 ```
+
+<!-- TODO: Screenshot Terminal-Ausgabe -->
+<!-- ![Terminal-Ausgabe](images/terminal_output.png) -->
 
 Memory Cues werden in der Terminal-Ausgabe orange angezeigt.
 
@@ -266,7 +284,7 @@ rekordbox-autocue-tool/
 ├── README.md
 ├── app.log                  ← Automatisch erstellt (Laufzeit-Log)
 │
-├── app/                     ← Aktive Pipeline (v28.1)
+├── app/                     ← Aktive Pipeline
 │   ├── config.py            ← Config-Loader (config.yaml → Python dict)
 │   ├── batch.py             ← CLI-Einstiegspunkt, rich Terminal-UI
 │   ├── writer.py            ← Rekordbox DB-Writer + ProcessResult
@@ -277,7 +295,7 @@ rekordbox-autocue-tool/
 │   ├── phrase_reader.py     ← PSSI-Phrasen aus ANLZ .EXT-Dateien
 │   ├── segments.py          ← Akustische Segmentierung (SSM + Novelty)
 │   ├── beatgrid.py          ← ANLZ-Beatgrid-Reader, Snap-to-Grid
-│   ├── mik_scraper.py       ← Mixed In Key Daten (ID3 + SQLite)
+│   ├── mik_scraper.py       ← Mixed In Key Daten (ID3 + SQLite, optional)
 │   ├── cbr.py               ← Case-Based Reasoning (5k-Brain)
 │   ├── waveform.py          ← PWAV-Waveform lesen
 │   ├── vectorize.py         ← CLI: Bibliothek vektorisieren
@@ -285,16 +303,14 @@ rekordbox-autocue-tool/
 │   ├── playlists.py         ← CLI: Monats-Playlisten generieren
 │   └── data/                ← Laufzeitdaten (predictions.jsonl, ...)
 │
-├── models/                  ← Trainierte LightGBM-Modelle
-│   ├── ml_hot_a.lgb         ← Hot A Regressor (~3 MB)
-│   ├── ml_hot_c.lgb         ← Hot C Regressor (~3 MB)
-│   └── ml_mem_2..6.lgb      ← Memory Cue Regressoren (Slot 2-6)
+├── images/                  ← Screenshots und Bilder fuer README
 │
-├── data/ml/                 ← ML-Trainingsdaten
-│   ├── features_X.npy       ← Feature-Matrix (4430, 693)
-│   ├── labels_Y.npy         ← Hot Cue Labels (4430, 2)
-│   ├── labels_mem_Y.npy     ← Memory Cue Labels (4430, 5)
-│   └── meta.pkl             ← Track-Metadaten
+├── models/                  ← Trainierte LightGBM-Modelle
+│   ├── ml_hot_a.lgb
+│   ├── ml_hot_c.lgb
+│   └── ml_mem_2..6.lgb
+│
+├── data/ml/                 ← ML-Trainingsdaten (werden lokal generiert)
 │
 ├── data/spectral_cache/     ← Gecachte Spektral-Features (pro Track)
 │
@@ -315,7 +331,7 @@ Das LightGBM-Modell nutzt 693 Features pro Track (469 Base + 224 Spektral):
 |------|---------|-----------|
 | 0-399 | PWAV Waveform | 400 |
 | 400-403 | BPM, Duration, Genre, Key | 4 |
-| 404-412 | MIK Cue Rel-Positionen + Count | 9 |
+| 404-412 | MIK Cue Rel-Positionen + Count (optional) | 9 |
 | 413-453 | Phrase Kinds + Rel-Starts + Count | 41 |
 | 454-466 | CBR Twin Positionen + Spacing | 13 |
 | 467-468 | Beat Count, Bar Count | 2 |
@@ -333,26 +349,12 @@ Das LightGBM-Modell nutzt 693 Features pro Track (469 Base + 224 Spektral):
 |------|-------------|-------------|
 | `off` | 469 | Nur PWAV + Metadaten (schnellster Modus) |
 | `custom` | 693 | +224 eigene librosa-Features (7 x 32 Segmente) |
-| `openl3` | 981 | +512 vortrainierte CNN-Embeddings (torchopenl3, Python <3.14) |
-| `auto` | 1205 | custom + openl3 kombiniert, LightGBM waehlt relevante Features |
+| `openl3` | 981 | +512 vortrainierte CNN-Embeddings via [torchopenl3](https://github.com/hugofloresgarcia/torchopenl3) |
+| `auto` | 1205 | custom + openl3 kombiniert |
+
+> **Hinweis zu OpenL3:** Der `openl3`-Modus nutzt [torchopenl3](https://github.com/hugofloresgarcia/torchopenl3), ein vortrainiertes CNN fuer Audio-Embeddings. Dieser Modus ist aktuell fuer Python 3.14 nicht verfuegbar, da die Abhaengigkeit `resampy` das entfernte `imp`-Modul verwendet. Sobald `resampy` aktualisiert wird, kann dieser Modus aktiviert werden.
 
 Die Spektral-Features werden pro Track einmal berechnet (~1s) und im Cache gespeichert (`data/spectral_cache/`).
-
-### Cross-Validation Ergebnisse (5-Fold, 4.430 Tracks)
-
-| Cue | ML MAE | Baseline MAE | Verbesserung | ±8b Accuracy |
-|-----|--------|--------------|--------------|--------------|
-| Hot A | 34.3b | 37.7b | +9.0% | 30.1% |
-| Hot C | 14.0b | 27.1b | +48.5% | 54.2% |
-| Mem 2 | 15.3b | 15.4b | +0.4% | 47.8% |
-| Mem 3 | 28.2b | 31.6b | +10.8% | 25.2% |
-| Mem 4 | 30.6b | 34.3b | +10.8% | 23.0% |
-| Mem 5 | 33.8b | 38.4b | +11.8% | 18.6% |
-| Mem 6 | 39.7b | 43.9b | +9.7% | 14.8% |
-
-Top Feature Importances (Spektral):
-- **Hot A**: Spectral Contrast (Breakdown-Erkennung) + High-Band Energie
-- **Hot C**: Mid/Low-Band Energie am Track-Ende (Last Drop)
 
 ---
 
@@ -362,9 +364,9 @@ Top Feature Importances (Spektral):
 |---------|-------------|
 | `v26` | Produktionsreife Basis-Pipeline |
 | `v26.1` | Triple-Check + PSSI-Phrasen |
-| `v27` | Quad-Check + LightGBM ML trainiert auf 4.430 Tracks |
+| `v27` | Quad-Check + LightGBM ML |
 | `v27.1` | Memory Cue ML-Modelle (Slot 2-6), Konfidenz-Scoring, Phrase×ML Source |
-| `v27.2` | Spektral-Features: Mel-Spektrogramm-Analyse (7 Features x 32 Segmente = +224 dims) |
+| `v27.2` | Spektral-Features: Mel-Spektrogramm-Analyse (+224 dims) |
 | `v27.3` | Memory Cues: 32-Beat-Grid-Snapping, PSSI-Phrasen primaer, MIK entfernt |
 | `v28` | Memory Cue Logik komplett neu: Intro/Outro relativ zu Hot Cues, Kick-Outro-Erkennung |
 | `v28.1` | Phrasen direkt nutzen (kein 32-Raster-Snapping), 16-Beat-Phrasen, Spacing-Toleranz |
@@ -383,8 +385,9 @@ Top Feature Importances (Spektral):
 → Track zuerst in Rekordbox importieren (Analyse-Daten muessen vorhanden sein).
 
 **MIK-Cues werden nicht erkannt**
-→ Pruefen ob [Mixed In Key](https://mixedinkey.com/) 11 installiert ist und Tracks analysiert wurden.
+→ Pruefen ob Mixed In Key 11 installiert ist und Tracks analysiert wurden.
 → Pfad in `config.yaml → mik_db_path` ggf. manuell setzen.
+→ MIK ist optional — das Skript funktioniert auch ohne Mixed In Key.
 
 **ML-Modell nicht gefunden (kein Quad-Check)**
 → Modell trainieren: `python tools/export_training_data.py` → `python tools/train_cue_model.py`
