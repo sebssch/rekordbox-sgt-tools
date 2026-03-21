@@ -1,5 +1,5 @@
 """
-v26 Cue-Logik
+v28.1 Cue-Logik
 Leitet Cue-Punkte aus der Track-Analyse ab.
 Implementiert die DJ-spezifische Cue-Hierarchie:
 

@@ -1,10 +1,10 @@
 # ╔══════════════════════════════════════════════════════════════╗
-# ║  Rekordbox AutoCue v26.1 — Konfiguration                    ║
+# ║  Rekordbox AutoCue v28.1 — Konfiguration                    ║
 # ║  Alle Parameter zentral hier konfigurieren.                  ║
 # ╚══════════════════════════════════════════════════════════════╝
 
 # --- Version ---
-version: "26.1"
+version: "28.1"
 
 # --- Cue-Beschriftung ---
 # Prefix der vor jedem Cue-Kommentar in Rekordbox erscheint.
@@ -23,7 +23,7 @@ memory_min_hot_distance_beats: 32 # Memory Cues müssen mind. N Beats von jedem 
 # --- MIK Integration (Mixed In Key) ---
 mik_snap_tolerance_beats: 4       # Hot B snappt auf MIK-Cue wenn innerhalb ±N Beats
 
-# --- Triple-Check Validator (v26.1) ---
+# --- Quad-Check Validator (v28.1) ---
 # MIK × Phrase Konsens-Toleranz: Wie viele Beats dürfen MIK-Cue und Phrase-Start auseinanderliegen?
 phrase_match_tolerance_beats: 2
 # Automatische Korrektur-Schwelle: Gelernte Offsets werden angewendet wenn Konfidenz > N%

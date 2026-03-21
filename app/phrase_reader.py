@@ -1,5 +1,5 @@
 """
-v26.1 Rekordbox Phrase Reader
+v28.1 Rekordbox Phrase Reader
 Liest PSSI-Phrasen aus ANLZ .EXT-Dateien (Rekordbox Phrase Analysis).
 Konvertiert 1-basierte Beat-Nummern in Timestamps via BeatGrid.
 

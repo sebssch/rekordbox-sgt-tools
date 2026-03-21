@@ -1,6 +1,6 @@
 """
-v26.1 Triple-Check Validator
-Validiert jeden Cue unabhaengig gegen drei Quellen:
+v28.1 Quad-Check Validator
+Validiert jeden Cue unabhaengig gegen vier Quellen:
 
   Stufe 1: MIK x Phrase (innerhalb +-2 Beats Toleranz)
   Stufe 2: Library (CBR) bestaetigt eine Quelle
