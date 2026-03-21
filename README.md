@@ -1,8 +1,8 @@
 # Rekordbox AutoCue
 
-> Python-Skript zum automatischen Analysieren und Taggen von Cue-Points nach einem vorgegebenen Muster fuer die [Rekordbox](https://rekordbox.com/de/)-Library — vorwiegend EDM-Tracks.
+> Python-Skript zum automatischen Analysieren und Taggen von Cue-Points nach einem vorgegebenen Muster fuer die Rekordbox-Library — vorwiegend EDM-Tracks.
 
-AutoCue analysiert deine Tracks akustisch (Spektrogramm + Waveform), nutzt [Mixed In Key](https://mixedinkey.com/)-Daten und ein LightGBM-Modell trainiert auf deiner Bibliothek — vollautomatisch, ohne Rekordbox-Cloud.
+AutoCue analysiert deine Tracks akustisch (Spektrogramm + Waveform), nutzt Mixed In Key-Daten und ein LightGBM-Modell trainiert auf deiner Bibliothek — vollautomatisch, ohne Rekordbox-Cloud.
 
 > **⚠️ Wichtiger Hinweis:** Dieses Tool ersetzt nicht die Arbeit des DJs. Trotz automatischer Analyse muessen Tracks weiterhin ueberprueft und bei Bedarf angepasst werden. Es dient lediglich als Unterstuetzung, um Zeit zu sparen. Einige Tracks werden fehlerfrei erkannt, andere hingegen gar nicht. Das haengt stark vom Genre und dessen Struktur ab — einfache EDM-Tracks sind leichter zu analysieren als komplexe Techno- oder unregelmaessig aufgebaute Hip-Hop-Tracks.
 
@@ -22,7 +22,7 @@ AutoCue analysiert deine Tracks akustisch (Spektrogramm + Waveform), nutzt [Mixe
 | **PSSI-Phrasen** | Rekordbox-Phrase-Analyse aus ANLZ .EXT-Dateien (Intro/Drop/Break/Outro) |
 | **Akustische Segmentierung** | SSM + Novelty + Energy + Percussive Ratio |
 | **Datenbank-Backup** | Automatisches Backup der Rekordbox-DB vor jeder Aenderung (max. 5 Backups) |
-| **MIK-Integration** | [Mixed In Key](https://mixedinkey.com/) Cue-Positionen als zusaetzliche Quelle (optional, nicht erforderlich) |
+| **MIK-Integration** | Mixed In Key Cue-Positionen als zusaetzliche Quelle (optional, nicht erforderlich) |
 | **CBR (5k-Brain)** | Case-Based Reasoning — findet Zwillings-Tracks aus deiner Sammlung |
 | **Konfigurierbar** | Alle Parameter in `config.yaml`, kein Hardcoding |
 
@@ -153,7 +153,7 @@ analyse_playlist: "--analyse-tracks"
 
 ### 1. Tracks vorbereiten
 
-Erstelle in [Rekordbox](https://rekordbox.com/de/) eine Playlist mit dem Namen `--analyse-tracks` (oder was in `config.yaml` konfiguriert ist) und fuege die zu analysierenden Tracks hinzu.
+Erstelle in Rekordbox eine Playlist mit dem Namen `--analyse-tracks` (oder was in `config.yaml` konfiguriert ist) und fuege die zu analysierenden Tracks hinzu.
 
 ![Playlist in Rekordbox anlegen](images/playlist.png)
 
@@ -176,7 +176,7 @@ Ergebnis: `app/data/track_vectors.npz` + `app/data/track_meta.pkl`
 ### 3. ML-Modell trainieren (einmalig / nach grossen Aenderungen)
 
 Trainiert LightGBM-Regressoren auf deinen manuell gesetzten Hot Cues.
-Nutzt PWAV-Waveforms, PSSI-Phrasen, Spektral-Features, CBR-Twin-Positionen und optional [Mixed In Key](https://mixedinkey.com/)-Daten.
+Nutzt PWAV-Waveforms, PSSI-Phrasen, Spektral-Features, CBR-Twin-Positionen und optional Mixed In Key-Daten.
 
 ```bash
 source .venv/bin/activate
@@ -375,7 +375,7 @@ Die Spektral-Features werden pro Track einmal berechnet (~1s) und im Cache gespe
 → Track zuerst in Rekordbox importieren (Analyse-Daten muessen vorhanden sein).
 
 **MIK-Cues werden nicht erkannt**
-→ Pruefen ob [Mixed In Key](https://mixedinkey.com/) 11 installiert ist und Tracks analysiert wurden.
+→ Pruefen ob Mixed In Key 11 installiert ist und Tracks analysiert wurden.
 → Pfad in `config.yaml → mik_db_path` ggf. manuell setzen.
 → MIK ist optional — das Skript funktioniert vollstaendig auch ohne Mixed In Key.
 
