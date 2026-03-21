@@ -329,7 +329,7 @@ def _filter_memory_near_hot(
     if not hot_times:
         return memory_cues
     beat_dur = 60.0 / grid.bpm
-    min_sec = min_beats * beat_dur
+    min_sec = min_beats * beat_dur - beat_dur * 0.5  # halber Beat Toleranz
     return [
         mc for mc in memory_cues
         if not any(abs(mc.time_sec - ht) < min_sec for ht in hot_times)
@@ -691,24 +691,13 @@ def generate_cues(
                 ))
 
     # ============================================
-    # 4. Memory Cues (max 10, priorisiert)
+    # 4. Memory Cues (max 10, 32-Beat-Raster)
     # ============================================
-    memory_cues = _generate_memory_cues(analysis, phrases=phrases,
-                                        cue_spacing=cue_spacing)
-
-    # MIK-Cues werden fuer Memory Cues NICHT mehr verwendet (v27.2).
-    # Nur ML-Anker und Phrasen/Segmente bestimmen die Strukturierung.
-
-    # ML-Memory als zusaetzliche Anker (Priority 3)
-    # Trainiert auf 5000+ manuell kuratierte Tracks → zuverlässige Strukturpositionen
-    if pwav_memory:
-        for pm_t in pwav_memory:
-            snapped = snap_to_phrase_boundary(pm_t, grid, n_beats=cue_spacing)
-            if not any(abs(snapped - c.time_sec) < beat_dur * 8 for c in memory_cues):
-                memory_cues.append(CuePoint(
-                    time_sec=snapped, kind=0, name="ML",
-                    comment="ML Structure", priority=3,
-                ))
+    memory_cues = _generate_memory_cues(
+        analysis, phrases=phrases,
+        hot_a_time=hot_a_time, hot_c_time=hot_c_time,
+        pwav_memory=pwav_memory, cue_spacing=cue_spacing,
+    )
 
     hot_times = [t for t in [hot_a_time, hot_b_time, hot_c_time] if t is not None]
     memory_cues = _filter_memory_near_hot(
@@ -732,33 +721,65 @@ def generate_cues(
 
 # --- Memory Cue Generierung mit Priorisierung ---
 
+def _is_kick_outro(segments: list[Segment]) -> bool:
+    """
+    Erkennt ob der Track ein Kick-Outro hat (Energie bleibt hoch, endet abrupt)
+    oder ein Fade-Outro (Vocals/Melodie, Energie faellt graduell).
+    """
+    if not segments:
+        return False
+    outro = segments[-1] if segments[-1].kind == "outro" else None
+    if outro is None:
+        return False
+    # Kick-Outro: Energie im Outro-Segment bleibt ueber 0.4
+    return outro.energy_mean > 0.4
+
+
 def _generate_memory_cues(analysis: TrackAnalysis,
                            phrases: list[PhraseSegment] | None = None,
+                           hot_a_time: float | None = None,
+                           hot_c_time: float | None = None,
+                           pwav_memory: list[float] | None = None,
                            cue_spacing: int = 32) -> list[CuePoint]:
     """
-    Generiert Memory Cues mit Prioritaets-System (v27.2):
-      Prio 1: Erster Downbeat
-      Prio 2: Intro-Struktur (32-Beat-Schritte)
-      Prio 3: Primaere Ankerpunkte (First Drop, Second Break) — 32-Beat-Grid
-      Prio 4: Phrasen-Uebergaenge (PSSI-Phrasen primaer, Segment-Fallback) — 32-Beat-Grid
-      Prio 5: Outro-Struktur (KEIN letzter Schlag)
+    Generiert Memory Cues im 32-Beat-Raster (v28):
 
-    Alle Struktur-Cues (Prio 3+4) werden auf das 32-Beat-Grid gesnappt,
-    sodass sie konsistente Abstande zum Track-Raster haben.
-    MIK-Daten werden NICHT fuer Memory Cues verwendet.
+      1. Erster Downbeat
+      2. Intro: Rueckwaerts von Hot A, max 3 Cues, 64er-Step bei langem Intro
+      3. Outro: Vorwaerts von Hot C, NUR bei Kick-Outro, 32/64-Regel
+      4. Struktur-Mitte: PSSI-Phrasen >= 32 Beats auf 32er-Raster
+         ML-Cues nur als Validierung (im Comment vermerkt)
+
+    Lieber keinen Memory Cue als einen falschen.
+    MIK-Daten werden NICHT verwendet.
     """
     grid = analysis.grid
     segments = analysis.segments
     cues: list[CuePoint] = []
 
-    if not segments:
+    if not segments or grid.count < 50:
         return cues
 
-    intro = segments[0] if segments[0].kind == "intro" else None
-    outro = segments[-1] if segments[-1].kind == "outro" else None
-
-    # ---- Prio 1: Erster Downbeat ----
+    beat_dur = 60.0 / max(grid.bpm, 1.0)
     first_downbeat = _first_downbeat_time(grid)
+    first_db_beat = get_beat_index_at_time(first_downbeat, grid)
+    last_beat = grid.count - 1
+
+    # ML-Positionen fuer Validierung sammeln (auf 32-Raster gesnappt)
+    ml_times: set[float] = set()
+    if pwav_memory:
+        for pm_t in pwav_memory:
+            snapped = snap_to_phrase_boundary(pm_t, grid, n_beats=cue_spacing)
+            ml_times.add(round(snapped, 2))
+
+    def _ml_tag(time_sec: float) -> str:
+        """Gibt ' (ML)' zurueck wenn eine ML-Position nahe liegt."""
+        for ml_t in ml_times:
+            if abs(ml_t - time_sec) < beat_dur * 4:
+                return " (ML)"
+        return ""
+
+    # ---- 1. Erster Downbeat ----
     cues.append(CuePoint(
         time_sec=first_downbeat,
         kind=0,
@@ -767,121 +788,168 @@ def _generate_memory_cues(analysis: TrackAnalysis,
         priority=1,
     ))
 
-    # ---- Prio 2: Intro-Struktur (alle N Beats) ----
-    if intro:
-        intro_start_beat = get_beat_index_at_time(intro.start_time, grid)
-        intro_end_beat = get_beat_index_at_time(intro.end_time, grid)
+    # ---- 2. Intro: Rueckwaerts von Hot A ----
+    if hot_a_time is not None:
+        hot_a_beat = get_beat_index_at_time(hot_a_time, grid)
+        intro_beats = hot_a_beat - first_db_beat
+        n_slots = intro_beats // cue_spacing
 
-        beat = intro_start_beat + cue_spacing
-        step = 1
-        while beat < intro_end_beat and beat < grid.count:
-            t = get_time_at_beat(beat, grid)
-            cues.append(CuePoint(
-                time_sec=t,
-                kind=0,
-                name=f"Intro {step}",
-                comment=f"Intro +{step * cue_spacing} Beats",
-                priority=2,
-            ))
-            beat += cue_spacing
-            step += 1
+        if n_slots >= 6:
+            step = 64
+        elif n_slots >= 1:
+            step = cue_spacing  # 32
+        else:
+            step = 0
 
-    # ---- Prio 3: Primaere Ankerpunkte (32-Beat-Grid) ----
-    first_drop = _find_first_drop(segments)
-    if first_drop:
-        t = snap_to_phrase_boundary(first_drop.start_time, grid, n_beats=cue_spacing)
-        cues.append(CuePoint(
-            time_sec=t,
-            kind=0,
-            name="First Drop",
-            comment="First Drop",
-            priority=3,
-        ))
+        if step > 0:
+            max_intro_cues = 3
+            positions: list[int] = []
+            beat = hot_a_beat - step
+            while beat > first_db_beat and len(positions) < max_intro_cues:
+                positions.append(beat)
+                beat -= step
+            positions.reverse()  # chronologisch
 
-    second_break = _find_second_break(segments)
-    if second_break:
-        t = snap_to_phrase_boundary(second_break.start_time, grid, n_beats=cue_spacing)
-        cues.append(CuePoint(
-            time_sec=t,
-            kind=0,
-            name="Second Break",
-            comment="Second Break",
-            priority=3,
-        ))
+            for i, b in enumerate(positions):
+                t = get_time_at_beat(b, grid)
+                tag = _ml_tag(t)
+                cues.append(CuePoint(
+                    time_sec=t,
+                    kind=0,
+                    name=f"Intro {i + 1}",
+                    comment=f"Intro Beat {b - first_db_beat}{tag}",
+                    priority=2,
+                ))
 
-    # ---- Prio 4: Phrasen-Uebergaenge (PSSI primaer, Segment-Fallback) ----
-    # PSSI-Phrasen direkt nutzen wenn vorhanden (exakte Rekordbox-Analyse)
+    # ---- 3. Outro: Vorwaerts von Hot C (nur Kick-Outro) ----
+    if hot_c_time is not None and _is_kick_outro(segments):
+        hot_c_beat = get_beat_index_at_time(hot_c_time, grid)
+        outro_beats = last_beat - hot_c_beat
+        n_slots = outro_beats // cue_spacing
+        safe_end_beat = last_beat - cue_spacing  # kein Cue ganz am Ende
+
+        if n_slots >= 6:
+            # Sehr langes Outro: alle 64 Beats
+            beat = hot_c_beat + 64
+            step_idx = 0
+            while beat <= safe_end_beat and beat < grid.count:
+                t = get_time_at_beat(beat, grid)
+                tag = _ml_tag(t)
+                cues.append(CuePoint(
+                    time_sec=t, kind=0,
+                    name=f"Outro {step_idx}",
+                    comment=f"Outro +{beat - hot_c_beat}b{tag}",
+                    priority=5,
+                ))
+                beat += 64
+                step_idx += 1
+
+        elif n_slots == 5:
+            # Sonderregel: Erster mit 64, Rest mit 32
+            positions_outro: list[int] = []
+            # Erster: +64 von Hot C
+            first_pos = hot_c_beat + 64
+            if first_pos <= safe_end_beat:
+                positions_outro.append(first_pos)
+                # Rest: alle 32
+                beat = first_pos + cue_spacing
+                while beat <= safe_end_beat and beat < grid.count:
+                    positions_outro.append(beat)
+                    beat += cue_spacing
+            for i, b in enumerate(positions_outro):
+                t = get_time_at_beat(b, grid)
+                tag = _ml_tag(t)
+                cues.append(CuePoint(
+                    time_sec=t, kind=0,
+                    name=f"Outro {i}",
+                    comment=f"Outro +{b - hot_c_beat}b{tag}",
+                    priority=5,
+                ))
+
+        elif n_slots >= 1:
+            # Normal: alle 32 Beats
+            beat = hot_c_beat + cue_spacing
+            step_idx = 0
+            while beat <= safe_end_beat and beat < grid.count:
+                t = get_time_at_beat(beat, grid)
+                tag = _ml_tag(t)
+                cues.append(CuePoint(
+                    time_sec=t, kind=0,
+                    name=f"Outro {step_idx}",
+                    comment=f"Outro +{beat - hot_c_beat}b{tag}",
+                    priority=5,
+                ))
+                beat += cue_spacing
+                step_idx += 1
+
+    # ---- 4. Struktur-Mitte: PSSI-Phrasen auf 32-Raster ----
+    mid_start = hot_a_time if hot_a_time is not None else first_downbeat
+    mid_end = hot_c_time if hot_c_time is not None else float(grid.times[-1])
+    mid_start_beat = get_beat_index_at_time(mid_start, grid)
+    mid_end_beat = get_beat_index_at_time(mid_end, grid)
+
     if phrases:
         for i, p in enumerate(phrases):
             if p.kind_name in ("Intro", "Outro"):
                 continue
+
+            # Phrase muss im Bereich Hot A..Hot C liegen
+            if p.time_start_sec <= mid_start or p.time_start_sec >= mid_end:
+                continue
+
+            # Phrase auf 32-Raster snappen und validieren
             t = snap_to_phrase_boundary(p.time_start_sec, grid, n_beats=cue_spacing)
+            t_beat = get_beat_index_at_time(t, grid)
+            mod32 = (t_beat - first_db_beat) % cue_spacing
+
+            # Phrase muss auf dem 32-Raster liegen (Toleranz: 1 Beat)
+            if mod32 > 1 and mod32 < (cue_spacing - 1):
+                continue
+
+            # Phrase muss mindestens 32 Beats lang sein
+            p_end = p.time_end_sec if hasattr(p, 'time_end_sec') else None
+            if p_end is not None:
+                p_beats = get_beat_index_at_time(p_end, grid) - t_beat
+                if p_beats < cue_spacing:
+                    continue
+
+            # Duplikat-Check
             already_exists = any(
                 abs(c.time_ms - int(round(t * 1000))) <= 500
                 for c in cues
             )
             if already_exists:
                 continue
+
+            tag = _ml_tag(t)
             cues.append(CuePoint(
                 time_sec=t,
                 kind=0,
                 name=f"Phrase {i + 1}",
-                comment=f"{p.kind_name} Start",
+                comment=f"{p.kind_name} Start{tag}",
                 priority=4,
             ))
     else:
-        # Fallback: akustische Segmente wenn keine PSSI-Phrasen
-        for i, seg in enumerate(segments):
-            if seg.kind in ("intro", "outro"):
-                continue
-            if i == 0:
-                continue
-            t = snap_to_phrase_boundary(seg.start_time, grid, n_beats=cue_spacing)
-            already_exists = any(
-                abs(c.time_ms - int(round(t * 1000))) <= 500
-                for c in cues
-            )
-            if already_exists:
-                continue
-            cues.append(CuePoint(
-                time_sec=t,
-                kind=0,
-                name=f"Phrase {i}",
-                comment=f"{seg.kind.capitalize()} Start",
-                priority=4,
-            ))
-
-    # ---- Prio 5: Outro-Struktur (KEIN letzter Schlag) ----
-    if outro:
-        outro_start_beat = get_beat_index_at_time(outro.start_time, grid)
-        outro_end_beat = min(
-            get_beat_index_at_time(outro.end_time, grid),
-            grid.count - 1
-        )
-
-        safe_end_beat = outro_end_beat - cue_spacing
-        if safe_end_beat <= outro_start_beat:
-            safe_end_beat = outro_end_beat
-
-        beat = outro_start_beat
-        step = 0
-        while beat <= safe_end_beat and beat < grid.count:
-            t = get_time_at_beat(beat, grid)
-
-            if beat >= grid.count - 4:
-                break
-
-            label = ("Outro Start" if step == 0
-                     else f"Outro +{step * cue_spacing}")
-            cues.append(CuePoint(
-                time_sec=t,
-                kind=0,
-                name=f"Outro {step}",
-                comment=label,
-                priority=5,
-            ))
-            beat += cue_spacing
-            step += 1
+        # Fallback: alle 32 Beats ab Hot A gliedern
+        if hot_a_time is not None and hot_c_time is not None:
+            beat = mid_start_beat + cue_spacing
+            step_idx = 0
+            while beat < mid_end_beat:
+                t = get_time_at_beat(beat, grid)
+                tag = _ml_tag(t)
+                already_exists = any(
+                    abs(c.time_ms - int(round(t * 1000))) <= 500
+                    for c in cues
+                )
+                if not already_exists:
+                    cues.append(CuePoint(
+                        time_sec=t, kind=0,
+                        name=f"Struktur {step_idx + 1}",
+                        comment=f"32b-Raster{tag}",
+                        priority=4,
+                    ))
+                beat += cue_spacing
+                step_idx += 1
 
     return cues
 

@@ -1,4 +1,4 @@
-# Rekordbox AutoCue v27.3
+# Rekordbox AutoCue v28
 
 > ML-basierte Cue-Point-Vorhersage fuer Rekordbox — lernt aus deinen ~5.000 Tracks.
 
@@ -29,13 +29,13 @@ Hot Cue A  →  "The Break"     — Break-Einstieg (Percussion faellt nach Intro
 Hot Cue B  →  "The Setup"     — Exakt N Beats vor Hot C (Default: 32 Beats)
 Hot Cue C  →  "The Last Drop" — Letzter Drop (Segment + Visual Edge)
 
-Memory Cues (max. 10):
+Memory Cues (max. 10, immer im 32-Beat-Raster):
   Prio 1 — Erster Downbeat
-  Prio 2 — Intro-Struktur (alle 32 Beats)
-  Prio 3 — First Drop, Second Break + ML-Anker (32-Beat-Grid)
-  Prio 4 — PSSI-Phrasen-Uebergaenge (32-Beat-Grid, Segment-Fallback)
-  Prio 5 — Outro-Struktur (nie am letzten Schlag, mind. 32 Beats vor Track-Ende)
-  MIK-Daten werden fuer Memory Cues NICHT verwendet (nur Hot Cues).
+  Prio 2 — Intro (rueckwaerts von Hot A, max 3 Cues, 64er-Step bei langem Intro)
+  Prio 4 — Struktur-Mitte: PSSI-Phrasen >= 32 Beats auf 32-Beat-Raster
+  Prio 5 — Outro (vorwaerts von Hot C, NUR bei Kick-Outro, 32/64-Regel)
+  ML-Cues nur als Validierung: "(ML)" im Comment wenn ML uebereinstimmt.
+  MIK-Daten werden fuer Memory Cues NICHT verwendet.
 ```
 
 Constraints:
@@ -222,7 +222,7 @@ rekordbox-autocue-tool/
 ├── README.md
 ├── app.log                  ← Automatisch erstellt (Laufzeit-Log)
 │
-├── app/                     ← Aktive Pipeline (v27.2)
+├── app/                     ← Aktive Pipeline (v28)
 │   ├── config.py            ← Config-Loader (config.yaml → Python dict)
 │   ├── batch.py             ← CLI-Einstiegspunkt, rich Terminal-UI
 │   ├── writer.py            ← Rekordbox DB-Writer + ProcessResult (v27-Pipeline)
@@ -257,7 +257,8 @@ rekordbox-autocue-tool/
 └── tools/                   ← Entwicklungs-Tools
     ├── export_training_data.py  ← Feature-Export fuer ML-Training
     ├── train_cue_model.py       ← LightGBM Training + Cross-Validation
-    └── compare_predictions.py   ← Vorhersage vs. Manuell Vergleich
+    ├── compare_predictions.py   ← Vorhersage vs. Manuell Vergleich
+    └── reset_playlist_cues.py   ← Cue-Reset fuer Playlist (doppelte Bestaetigung)
 ```
 
 ---
@@ -321,6 +322,7 @@ Top Feature Importances (Spektral):
 | `v27.1` | Memory Cue ML-Modelle (Slot 2-6), Konfidenz-Scoring, Phrase×ML Source |
 | `v27.2` | Spektral-Features: Mel-Spektrogramm-Analyse (7 Features x 32 Segmente = +224 dims) |
 | `v27.3` | Memory Cues: 32-Beat-Grid-Snapping, PSSI-Phrasen primaer, MIK entfernt |
+| `v28` | Memory Cue Logik komplett neu: Intro rueckwaerts von Hot A (max 3), Outro nur Kick (32/64-Regel), Phrasen >= 32b auf Raster, ML nur Validierung, Playlist-Cue-Reset-Tool |
 
 ---
 
