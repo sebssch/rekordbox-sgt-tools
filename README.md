@@ -1,8 +1,8 @@
-# Rekordbox AutoCue v28.1
+# [Rekordbox](https://rekordbox.com/de/) AutoCue v28.1
 
-> ML-basierte Cue-Point-Vorhersage fuer Rekordbox — lernt aus deinen ~5.000 Tracks.
+> ML-basierte Cue-Point-Vorhersage fuer [Rekordbox](https://rekordbox.com/de/) — lernt aus deinen ~5.000 Tracks.
 
-AutoCue analysiert deine Tracks akustisch (Spektrogramm + Waveform), nutzt Mixed In Key-Daten und ein LightGBM-Modell trainiert auf deiner Bibliothek — vollautomatisch, ohne Rekordbox-Cloud.
+AutoCue analysiert deine Tracks akustisch (Spektrogramm + Waveform), nutzt [Mixed In Key](https://mixedinkey.com/)-Daten und ein LightGBM-Modell trainiert auf deiner Bibliothek — vollautomatisch, ohne Rekordbox-Cloud.
 
 ---
 
@@ -15,9 +15,10 @@ AutoCue analysiert deine Tracks akustisch (Spektrogramm + Waveform), nutzt Mixed
 | **LightGBM ML (v27+)** | Supervised Learning auf 4.430 Tracks, 693-dim Feature-Vektor |
 | **Spektral-Features (v28)** | Mel-Spektrogramm-Analyse: Band-Energien, Novelty, Onset, Contrast, Flatness |
 | **Memory Cue Engine (v28.1)** | Phrasen-basierte Memory Cues: Intro/Outro-Gliederung + Strukturmitte |
-| **PSSI-Phrasen** | Rekordbox-Phrase-Analyse aus ANLZ .EXT-Dateien (Intro/Drop/Break/Outro) |
+| **PSSI-Phrasen** | [Rekordbox](https://rekordbox.com/de/)-Phrase-Analyse aus ANLZ .EXT-Dateien (Intro/Drop/Break/Outro) |
 | **Akustische Segmentierung** | SSM + Novelty + Energy + Percussive Ratio |
-| **MIK-Integration** | Mixed In Key Cue-Positionen als primaere Hotspots (ID3-Tags + SQLite) |
+| **Datenbank-Backup** | Automatisches Backup der Rekordbox-DB vor jeder Aenderung (max. 5 Backups) |
+| **[Mixed In Key](https://mixedinkey.com/)-Integration** | Mixed In Key Cue-Positionen als primaere Hotspots (ID3-Tags + SQLite) |
 | **CBR (5k-Brain)** | Case-Based Reasoning — findet Zwillings-Tracks aus deiner Sammlung |
 | **Konfigurierbar** | Alle Parameter in `config.yaml`, kein Hardcoding |
 
@@ -74,8 +75,8 @@ MIK-Daten werden fuer Memory Cues NICHT verwendet.
 
 - macOS 13+ (Apple Silicon oder Intel)
 - Python 3.12+
-- Rekordbox 6.x oder 7.x installiert und konfiguriert
-- Mixed In Key 11 *(optional — fuer MIK Cue-Integration)*
+- [Rekordbox](https://rekordbox.com/de/) 6.x oder 7.x installiert und konfiguriert
+- [Mixed In Key](https://mixedinkey.com/) 11 *(optional — fuer MIK Cue-Integration)*
 
 ---
 
@@ -181,6 +182,8 @@ python tools/train_cue_model.py
 Ohne trainiertes Modell: automatischer Fallback auf Triple-Check (kein Fehler, kein Abbruch).
 
 ### 4. Analyse starten
+
+> **Sicherheit:** Vor jeder Live-Aenderung wird automatisch ein Backup der [Rekordbox](https://rekordbox.com/de/)-Datenbank (`master.db`) erstellt. Es werden maximal 5 Backups aufbewahrt — aeltere werden automatisch geloescht. Backup-Pfad: neben der `master.db` als `master.db.backup_YYYYMMDD_HHMMSS`.
 
 ```bash
 source .venv/bin/activate
@@ -380,7 +383,7 @@ Top Feature Importances (Spektral):
 → Track zuerst in Rekordbox importieren (Analyse-Daten muessen vorhanden sein).
 
 **MIK-Cues werden nicht erkannt**
-→ Pruefen ob Mixed In Key 11 installiert ist und Tracks analysiert wurden.
+→ Pruefen ob [Mixed In Key](https://mixedinkey.com/) 11 installiert ist und Tracks analysiert wurden.
 → Pfad in `config.yaml → mik_db_path` ggf. manuell setzen.
 
 **ML-Modell nicht gefunden (kein Quad-Check)**
