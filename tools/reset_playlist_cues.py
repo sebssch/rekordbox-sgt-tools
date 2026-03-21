@@ -19,8 +19,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import logging
 import pyrekordbox as prb
 from app.batch import find_playlist, get_playlist_tracks
+from app.writer import backup_database
 
 
 # ---------------------------------------------------------------------------
@@ -132,16 +134,22 @@ def main():
 
     # --- Bestaetigung 2 ---
     print()
-    print("  ACHTUNG: Diese Aktion kann NICHT rueckgaengig gemacht werden!")
-    print("  Erstelle vorher ein Backup der Rekordbox-Datenbank.\n")
+    print("  ACHTUNG: Diese Aktion kann nur ueber das Backup rueckgaengig gemacht werden!\n")
     confirm = input("  Zum Bestaetigen tippe 'LOESCHEN' ein: ").strip()
     if confirm != "LOESCHEN":
         print("\n  Abgebrochen — Eingabe war nicht 'LOESCHEN'.")
         sys.exit(0)
 
+    # --- Backup ---
+    print()
+    print("  Erstelle Datenbank-Backup...")
+    backup_database()
+
     # --- Loeschen ---
     print()
     deleted = 0
+    # pyrekordbox XML-Warnung unterdruecken (Playlist nicht in XML = normal)
+    logging.getLogger("pyrekordbox.db6.database").setLevel(logging.ERROR)
     for content, cues in track_details:
         artist = content.Artist.Name if content.Artist else ""
         title = content.Title or "?"
