@@ -20,3 +20,4 @@ app.log
 .claude/
 .idea/
 .vscode/
+.DS_Store
