@@ -79,8 +79,8 @@ MIK-Daten werden fuer Memory Cues NICHT verwendet.
 
 - macOS 13+ (Apple Silicon oder Intel)
 - Python 3.12+
-- Rekordbox 6.x oder 7.x installiert und konfiguriert
-- Mixed In Key 11 *(optional — das Skript laeuft auch ohne MIK, da MIK-Features nur ~3% der ML-Vorhersagekraft ausmachen)*
+- [Rekordbox](https://rekordbox.com/de/) 6.x oder 7.x installiert und konfiguriert
+- [Mixed In Key](https://mixedinkey.com/) 11 *(optional — das Skript laeuft auch ohne MIK, da MIK-Features nur ~3% der ML-Vorhersagekraft ausmachen)*
 
 ---
 
