@@ -825,12 +825,26 @@ def _generate_memory_cues(analysis: TrackAnalysis,
                     priority=2,
                 ))
 
-    # ---- 3. Outro: Vorwaerts von Hot C (nur Kick-Outro) ----
-    if hot_c_time is not None and _is_kick_outro(segments):
+    # ---- 3. Outro: Vorwaerts von Hot C ----
+    # Outro-Cues werden IMMER gesetzt — bei Fade-Outro endet die Kette
+    # frueher (wo die Energie noch signifikant ist).
+    if hot_c_time is not None:
         hot_c_beat = get_beat_index_at_time(hot_c_time, grid)
-        outro_beats = last_beat - hot_c_beat
-        n_slots = outro_beats // cue_spacing
-        safe_end_beat = last_beat - cue_spacing  # kein Cue ganz am Ende
+        kick_outro = _is_kick_outro(segments)
+
+        # safe_end_beat: kein Memory Cue direkt am Track-Ende
+        # Bei Fade-Outro zusaetzlich nicht tiefer als 32b ins Fade hinein
+        safe_end_beat = last_beat - cue_spacing
+        if not kick_outro:
+            outro_seg = segments[-1] if segments and segments[-1].kind == "outro" else None
+            if outro_seg:
+                outro_start_beat = get_beat_index_at_time(outro_seg.start_time, grid)
+                # Nicht tiefer als 32b ins Fade-Outro hinein
+                fade_limit = outro_start_beat + cue_spacing
+                safe_end_beat = min(fade_limit, safe_end_beat)
+
+        outro_beats = safe_end_beat - hot_c_beat
+        n_slots = max(0, outro_beats // cue_spacing)
 
         # Outro-Cues relativ zum Hot C Beat (nicht zum globalen Raster)
         def _outro_positions() -> list[int]:
@@ -859,13 +873,14 @@ def _generate_memory_cues(analysis: TrackAnalysis,
                     b += cue_spacing
             return pos
 
+        outro_label = "Outro" if kick_outro else "Fade"
         for i, b in enumerate(_outro_positions()):
             t = get_time_at_beat(b, grid)
             tag = _ml_tag(t)
             cues.append(CuePoint(
                 time_sec=t, kind=0,
-                name=f"Outro {i}",
-                comment=f"Outro +{b - hot_c_beat}b{tag}",
+                name=f"{outro_label} {i}",
+                comment=f"{outro_label} +{b - hot_c_beat}b{tag}",
                 priority=5,
             ))
 
@@ -947,24 +962,29 @@ def _generate_memory_cues(analysis: TrackAnalysis,
 def _apply_memory_cue_limit(cues: list[CuePoint]) -> list[CuePoint]:
     """
     Begrenzt Memory Cues auf MAX_MEMORY_CUES (10).
-    Entfernt niedrig-priorisierte Cues zuerst.
 
-    Prioritaets-Reihenfolge:
-      1 = Erster Downbeat (immer behalten)
-      2 = Intro-Struktur
-      3 = Primaere Ankerpunkte (First Drop, Second Break)
-      4 = Phrasen-Uebergaenge
-      5 = Outro-Struktur
+    Garantierte Slots (werden IMMER behalten):
+      Prio 1 = Erster Downbeat
+      Prio 2 = Intro-Struktur (max 3)
+      Prio 5 = Outro-Struktur (max 3)
+
+    Verbleibende Slots fuellen sich mit:
+      Prio 3 = ML-Ankerpunkte
+      Prio 4 = Phrasen-Uebergaenge
     """
     if len(cues) <= MAX_MEMORY_CUES:
         return cues
 
-    # Sortiere nach Prioritaet (aufsteigend = wichtigste zuerst),
-    # dann nach Zeit (frueh → spaet)
-    sorted_cues = sorted(cues, key=lambda c: (c.priority, c.time_sec))
+    # Garantierte Cues: Downbeat (1), Intro (2), Outro (5)
+    guaranteed = [c for c in cues if c.priority in (1, 2, 5)]
+    fillable = [c for c in cues if c.priority not in (1, 2, 5)]
 
-    # Behalte die wichtigsten MAX_MEMORY_CUES
-    kept = sorted_cues[:MAX_MEMORY_CUES]
+    # Fillable nach Prio sortieren (3 vor 4)
+    fillable.sort(key=lambda c: (c.priority, c.time_sec))
+
+    # Auffuellen bis MAX_MEMORY_CUES
+    remaining = MAX_MEMORY_CUES - len(guaranteed)
+    kept = guaranteed + fillable[:max(0, remaining)]
 
     # Zurueck in zeitliche Reihenfolge
     kept.sort(key=lambda c: c.time_sec)
