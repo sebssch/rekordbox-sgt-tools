@@ -371,7 +371,7 @@ def _filter_memory_spacing(
         return memory_cues
 
     beat_dur = 60.0 / max(grid.bpm, 1.0)
-    min_sec = min_beats * beat_dur
+    min_sec = min_beats * beat_dur - beat_dur * 0.5  # halber Beat Toleranz
 
     # Wichtigste Cues zuerst pruefen (nach Prio, dann Zeit)
     sorted_cues = sorted(memory_cues, key=lambda c: (c.priority, c.time_sec))
@@ -804,9 +804,13 @@ def _generate_memory_cues(analysis: TrackAnalysis,
         if step > 0:
             max_intro_cues = 3
             positions: list[int] = []
+            # Rueckwaerts von Hot A im Step-Abstand
             beat = hot_a_beat - step
             while beat > first_db_beat and len(positions) < max_intro_cues:
-                positions.append(beat)
+                # Auf Downbeat snappen (naechstes 4er-Vielfaches)
+                snapped_beat = round(beat / 4) * 4
+                if snapped_beat > first_db_beat and snapped_beat not in positions:
+                    positions.append(snapped_beat)
                 beat -= step
             positions.reverse()  # chronologisch
 
@@ -828,65 +832,52 @@ def _generate_memory_cues(analysis: TrackAnalysis,
         n_slots = outro_beats // cue_spacing
         safe_end_beat = last_beat - cue_spacing  # kein Cue ganz am Ende
 
-        if n_slots >= 6:
-            # Sehr langes Outro: alle 64 Beats
-            beat = hot_c_beat + 64
-            step_idx = 0
-            while beat <= safe_end_beat and beat < grid.count:
-                t = get_time_at_beat(beat, grid)
-                tag = _ml_tag(t)
-                cues.append(CuePoint(
-                    time_sec=t, kind=0,
-                    name=f"Outro {step_idx}",
-                    comment=f"Outro +{beat - hot_c_beat}b{tag}",
-                    priority=5,
-                ))
-                beat += 64
-                step_idx += 1
+        # Outro-Cues relativ zum Hot C Beat (nicht zum globalen Raster)
+        def _outro_positions() -> list[int]:
+            """Berechnet Outro-Cue-Positionen relativ zu Hot C."""
+            pos: list[int] = []
+            if n_slots >= 6:
+                # Sehr langes Outro: alle 64 Beats
+                b = hot_c_beat + 64
+                while b <= safe_end_beat and b < grid.count:
+                    pos.append(b)
+                    b += 64
+            elif n_slots == 5:
+                # Sonderregel: Erster mit 64, Rest mit 32
+                first = hot_c_beat + 64
+                if first <= safe_end_beat:
+                    pos.append(first)
+                    b = first + cue_spacing
+                    while b <= safe_end_beat and b < grid.count:
+                        pos.append(b)
+                        b += cue_spacing
+            elif n_slots >= 1:
+                # Normal: alle 32 Beats
+                b = hot_c_beat + cue_spacing
+                while b <= safe_end_beat and b < grid.count:
+                    pos.append(b)
+                    b += cue_spacing
+            return pos
 
-        elif n_slots == 5:
-            # Sonderregel: Erster mit 64, Rest mit 32
-            positions_outro: list[int] = []
-            # Erster: +64 von Hot C
-            first_pos = hot_c_beat + 64
-            if first_pos <= safe_end_beat:
-                positions_outro.append(first_pos)
-                # Rest: alle 32
-                beat = first_pos + cue_spacing
-                while beat <= safe_end_beat and beat < grid.count:
-                    positions_outro.append(beat)
-                    beat += cue_spacing
-            for i, b in enumerate(positions_outro):
-                t = get_time_at_beat(b, grid)
-                tag = _ml_tag(t)
-                cues.append(CuePoint(
-                    time_sec=t, kind=0,
-                    name=f"Outro {i}",
-                    comment=f"Outro +{b - hot_c_beat}b{tag}",
-                    priority=5,
-                ))
+        for i, b in enumerate(_outro_positions()):
+            t = get_time_at_beat(b, grid)
+            tag = _ml_tag(t)
+            cues.append(CuePoint(
+                time_sec=t, kind=0,
+                name=f"Outro {i}",
+                comment=f"Outro +{b - hot_c_beat}b{tag}",
+                priority=5,
+            ))
 
-        elif n_slots >= 1:
-            # Normal: alle 32 Beats
-            beat = hot_c_beat + cue_spacing
-            step_idx = 0
-            while beat <= safe_end_beat and beat < grid.count:
-                t = get_time_at_beat(beat, grid)
-                tag = _ml_tag(t)
-                cues.append(CuePoint(
-                    time_sec=t, kind=0,
-                    name=f"Outro {step_idx}",
-                    comment=f"Outro +{beat - hot_c_beat}b{tag}",
-                    priority=5,
-                ))
-                beat += cue_spacing
-                step_idx += 1
-
-    # ---- 4. Struktur-Mitte: PSSI-Phrasen auf 32-Raster ----
+    # ---- 4. Struktur-Mitte: PSSI-Phrasen direkt nutzen ----
+    # Phrasen-Positionen werden direkt uebernommen (nicht auf globales 32-Raster
+    # gesnappt), da die Track-Struktur intern versetzt sein kann.
+    # Mindestlaenge: 16 Beats (halbe Phrase ist noch strukturell relevant).
     mid_start = hot_a_time if hot_a_time is not None else first_downbeat
     mid_end = hot_c_time if hot_c_time is not None else float(grid.times[-1])
     mid_start_beat = get_beat_index_at_time(mid_start, grid)
     mid_end_beat = get_beat_index_at_time(mid_end, grid)
+    min_phrase_beats = 16  # Phrasen >= 16 Beats werden beruecksichtigt
 
     if phrases:
         for i, p in enumerate(phrases):
@@ -897,20 +888,19 @@ def _generate_memory_cues(analysis: TrackAnalysis,
             if p.time_start_sec <= mid_start or p.time_start_sec >= mid_end:
                 continue
 
-            # Phrase auf 32-Raster snappen und validieren
-            t = snap_to_phrase_boundary(p.time_start_sec, grid, n_beats=cue_spacing)
+            # Auf naechsten Downbeat snappen (4-Beat-Grenze)
+            t = snap_to_downbeat(p.time_start_sec, grid)
             t_beat = get_beat_index_at_time(t, grid)
-            mod32 = (t_beat - first_db_beat) % cue_spacing
 
-            # Phrase muss auf dem 32-Raster liegen (Toleranz: 1 Beat)
-            if mod32 > 1 and mod32 < (cue_spacing - 1):
+            # Phrase muss auf einem Downbeat liegen (mod 4 check)
+            if t_beat % 4 > 1:
                 continue
 
-            # Phrase muss mindestens 32 Beats lang sein
+            # Phrase muss mindestens 16 Beats lang sein
             p_end = p.time_end_sec if hasattr(p, 'time_end_sec') else None
             if p_end is not None:
                 p_beats = get_beat_index_at_time(p_end, grid) - t_beat
-                if p_beats < cue_spacing:
+                if p_beats < min_phrase_beats:
                     continue
 
             # Duplikat-Check

@@ -269,6 +269,16 @@ def run_playlist(
                 for line in build_status_report(result.decisions):
                     console.print(line)
 
+                # Memory Cue Details
+                mem_cues = [c for c in result_cues if c.kind == 0]
+                if mem_cues:
+                    parts = []
+                    for mc in mem_cues:
+                        m = int(mc.time_sec // 60)
+                        s = mc.time_sec % 60
+                        parts.append(f"[dark_orange]{m}:{s:05.2f}[/dark_orange] {escape(mc.comment[:20])}")
+                    console.print(f"    [dark_orange]Mem:[/dark_orange] " + "  |  ".join(parts))
+
                 stats["processed"] += 1
                 log.info("OK: %s  Cues=%d", title, len(result_cues))
 
