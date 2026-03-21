@@ -1,8 +1,10 @@
 # Rekordbox AutoCue
 
-> ML-basierte Cue-Point-Vorhersage fuer Rekordbox — lernt aus deinen Tracks.
+> Python-Skript zum automatischen Analysieren und Taggen von Cue-Points nach einem vorgegebenen Muster fuer die [Rekordbox](https://rekordbox.com/de/)-Library — vorwiegend EDM-Tracks.
 
 AutoCue analysiert deine Tracks akustisch (Spektrogramm + Waveform), nutzt [Mixed In Key](https://mixedinkey.com/)-Daten und ein LightGBM-Modell trainiert auf deiner Bibliothek — vollautomatisch, ohne Rekordbox-Cloud.
+
+> **⚠️ Wichtiger Hinweis:** Dieses Tool ersetzt nicht die Arbeit des DJs. Trotz automatischer Analyse muessen Tracks weiterhin ueberprueft und bei Bedarf angepasst werden. Es dient lediglich als Unterstuetzung, um Zeit zu sparen. Einige Tracks werden fehlerfrei erkannt, andere hingegen gar nicht. Das haengt stark vom Genre und dessen Struktur ab — einfache EDM-Tracks sind leichter zu analysieren als komplexe Techno- oder unregelmaessig aufgebaute Hip-Hop-Tracks.
 
 ![Terminal-Ausgabe waehrend der Analyse](images/terminal-analyse.png)
 
