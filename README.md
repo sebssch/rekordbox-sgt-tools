@@ -1,4 +1,4 @@
-# Rekordbox AutoCue v28
+# Rekordbox AutoCue v28.1
 
 > ML-basierte Cue-Point-Vorhersage fuer Rekordbox — lernt aus deinen ~5.000 Tracks.
 
@@ -11,9 +11,10 @@ AutoCue analysiert deine Tracks akustisch (Spektrogramm + Waveform), nutzt Mixed
 | Feature | Beschreibung |
 |---------|-------------|
 | **Beatgrid-Sync** | Cues snappen exakt auf Downbeats via ANLZ-Beatgrid |
-| **Quad-Check (v27)** | Jeder Hot Cue unabhaengig validiert: MIK x Phrase x Library x ML |
-| **LightGBM ML (v27)** | Supervised Learning auf 4.430 Tracks |
-| **Spektral-Features (v27.2)** | Mel-Spektrogramm-Analyse: Band-Energien, Novelty, Onset, Contrast, Flatness |
+| **Quad-Check (v28)** | Jeder Hot Cue unabhaengig validiert: MIK x Phrase x Library x ML |
+| **LightGBM ML (v27+)** | Supervised Learning auf 4.430 Tracks, 693-dim Feature-Vektor |
+| **Spektral-Features (v28)** | Mel-Spektrogramm-Analyse: Band-Energien, Novelty, Onset, Contrast, Flatness |
+| **Memory Cue Engine (v28.1)** | Phrasen-basierte Memory Cues: Intro/Outro-Gliederung + Strukturmitte |
 | **PSSI-Phrasen** | Rekordbox-Phrase-Analyse aus ANLZ .EXT-Dateien (Intro/Drop/Break/Outro) |
 | **Akustische Segmentierung** | SSM + Novelty + Energy + Percussive Ratio |
 | **MIK-Integration** | Mixed In Key Cue-Positionen als primaere Hotspots (ID3-Tags + SQLite) |
@@ -24,25 +25,48 @@ AutoCue analysiert deine Tracks akustisch (Spektrogramm + Waveform), nutzt Mixed
 
 ## Cue-Hierarchie
 
+### Hot Cues
+
 ```
 Hot Cue A  →  "The Break"     — Break-Einstieg (Percussion faellt nach Intro)
 Hot Cue B  →  "The Setup"     — Exakt N Beats vor Hot C (Default: 32 Beats)
 Hot Cue C  →  "The Last Drop" — Letzter Drop (Segment + Visual Edge)
-
-Memory Cues (max. 10, immer im 32-Beat-Raster):
-  Prio 1 — Erster Downbeat
-  Prio 2 — Intro (rueckwaerts von Hot A, max 3 Cues, 64er-Step bei langem Intro)
-  Prio 4 — Struktur-Mitte: PSSI-Phrasen >= 32 Beats auf 32-Beat-Raster
-  Prio 5 — Outro (vorwaerts von Hot C, NUR bei Kick-Outro, 32/64-Regel)
-  ML-Cues nur als Validierung: "(ML)" im Comment wenn ML uebereinstimmt.
-  MIK-Daten werden fuer Memory Cues NICHT verwendet.
 ```
 
-Constraints:
-- Hot A <-> Hot B: mind. 128 Beats (32 Bars) Abstand
-- Memory Cues: mind. 32 Beats von jedem Hot Cue entfernt
-- Memory Cues: mind. 32 Beats untereinander
+### Memory Cues (v28.1)
+
+Memory Cues gliedern die Track-Struktur relativ zu den Hot Cues:
+
+```
+Prio 1 — Erster Downbeat (immer gesetzt)
+Prio 2 — Intro-Gliederung (rueckwaerts von Hot A)
+           → max 3 Cues, alle 32 Beats Richtung Hot A
+           → bei Intro >= 192 Beats (6+ Slots): alle 64 Beats
+Prio 4 — Struktur-Mitte: PSSI-Phrasen direkt uebernehmen
+           → Phrasen >= 16 Beats werden beruecksichtigt
+           → Positionen direkt nutzen (kein globales 32-Raster-Snapping)
+           → Track-interner Versatz (z.B. mod32=16) wird respektiert
+           → Fallback ohne PSSI: alle 32 Beats ab Hot A
+Prio 5 — Outro-Gliederung (vorwaerts von Hot C)
+           → Nur bei Kick-Outro (Energie > 0.4, sauberer Beat-Auslauf)
+           → Kein Cue bei Fade-Outro (Vocals/Melodie auslaufend)
+           → Abstands-Regeln relativ zu Hot C:
+             1-4 Slots: alle 32 Beats
+             5 Slots:   erster +64b, Rest +32b
+             6+ Slots:  alle 64 Beats
+           → Kein Cue am Track-Ende (mind. 32 Beats Abstand)
+
+ML-Cues nur als Validierung: "(ML)" im Comment wenn ML uebereinstimmt.
+MIK-Daten werden fuer Memory Cues NICHT verwendet.
+```
+
+### Constraints
+
+- Hot A ↔ Hot B: mind. 128 Beats (32 Bars) Abstand
+- Memory Cues: mind. 32 Beats von jedem Hot Cue entfernt (0.5 Beat Toleranz)
+- Memory Cues: mind. 32 Beats untereinander (0.5 Beat Toleranz)
 - Memory Cues: mind. 32 Beats vor Track-Ende (kein letzter Schlag)
+- Lieber keinen Memory Cue als einen falschen
 
 ---
 
@@ -80,6 +104,9 @@ brew install libomp
 Alle Parameter werden in `config.yaml` gesteuert:
 
 ```yaml
+# Version
+version: "28.1"
+
 # Cue-Prefix — erscheint in Rekordbox als Cue-Label
 cue_prefix: "A:"               # z.B. "A: The Break", "A: The Last Drop"
 
@@ -130,7 +157,7 @@ Ergebnis: `app/data/track_vectors.npz` + `app/data/track_meta.pkl`
 ### 3. ML-Modell trainieren (einmalig / nach grossen Aenderungen)
 
 Trainiert LightGBM-Regressoren auf deinen manuell gesetzten Hot Cues.
-Nutzt PWAV-Waveforms, MIK-Daten, PSSI-Phrasen und CBR-Twin-Positionen als Features.
+Nutzt PWAV-Waveforms, MIK-Daten, PSSI-Phrasen, Spektral-Features und CBR-Twin-Positionen.
 
 ```bash
 source .venv/bin/activate
@@ -186,16 +213,22 @@ python tools/compare_predictions.py
 ### 6. Terminal-Ausgabe
 
 ```
-  AutoCue v27                              LIVE
-  Playlist: --analyse-tracks
+  AutoCue v28.1                            DRY-RUN
+  Playlist: --analyse-tracks (12 Tracks)
 
-  ✓ Daft Punk – Get Lucky          A:2:14.08  B:5:58.00  C:6:30.04  Mem:7
-    ✓ Hot A   2:14.08  [MIK+PWAV]     The Break
-    ✓ Hot B   5:58.00  [DERIVED]      Setup (32b vor Drop)
-    ✓ Hot C   6:30.04  [MIK+PHRASE]   The Last Drop
+  ✓ Daft Punk – Get Lucky
+    Hot A  [2:14.08]  Bar  71  — The Break
+    Hot B  [5:58.00]  Bar 179  — Setup (32b vor Drop)
+    Hot C  [6:30.04]  Bar 195  — The Last Drop
+    Mem    [0:00.12]  Bar   1  — Erster Downbeat        (orange)
+    Mem    [1:42.00]  Bar  51  — Intro Beat 64          (orange)
+    Mem    [4:26.08]  Bar 133  — Chorus Start           (orange)
+    Mem    [7:02.04]  Bar 211  — Outro +32b             (orange)
 ```
 
-Quad-Check-Logik pro Cue:
+Memory Cues werden in der Terminal-Ausgabe orange angezeigt.
+
+Quad-Check-Logik pro Hot Cue:
 - `[MIK+PHRASE]` — MIK und PSSI-Phrase uebereinstimmend (staerkster Konsens)
 - `[MIK+PWAV]` / `[PHRASE+PWAV]` — ML bestaetigt MIK oder Phrase
 - `[MIK+LIBRARY]` oder `[PHRASE+LIBRARY]` — CBR bestaetigt eine Quelle
@@ -203,7 +236,15 @@ Quad-Check-Logik pro Cue:
 - `[DERIVED]` — Hot B: immer aus Hot C abgeleitet, kein Quad-Check
 - `✗ [—]` — Kein Konsens, Cue wird uebersprungen (Partial Success)
 
-### 7. Intelligente Playlisten nach Monat/Jahr generieren
+### 7. Cues einer Playlist zuruecksetzen
+
+Loescht alle Cues (Hot + Memory) fuer Tracks in einer Playlist. Doppelte Sicherheitsabfrage.
+
+```bash
+python tools/reset_playlist_cues.py "--analyse-tracks"
+```
+
+### 8. Intelligente Playlisten nach Monat/Jahr generieren
 
 Erstellt 12 Smart-Playlisten (Monats-Filter) fuer ein Zieljahr. **Rekordbox muss dazu geschlossen sein.**
 
@@ -222,11 +263,11 @@ rekordbox-autocue-tool/
 ├── README.md
 ├── app.log                  ← Automatisch erstellt (Laufzeit-Log)
 │
-├── app/                     ← Aktive Pipeline (v28)
+├── app/                     ← Aktive Pipeline (v28.1)
 │   ├── config.py            ← Config-Loader (config.yaml → Python dict)
 │   ├── batch.py             ← CLI-Einstiegspunkt, rich Terminal-UI
-│   ├── writer.py            ← Rekordbox DB-Writer + ProcessResult (v27-Pipeline)
-│   ├── cue_logic.py         ← Quad-Check Cue-Hierarchie (v27)
+│   ├── writer.py            ← Rekordbox DB-Writer + ProcessResult
+│   ├── cue_logic.py         ← Quad-Check Cue-Hierarchie + Memory Cue Engine
 │   ├── validator.py         ← Quad-Check Validator (MIK x Phrase x Library x ML)
 │   ├── ml_predictor.py      ← LightGBM Inference (Hot A + Hot C + Memory Prediction)
 │   ├── spectral.py          ← Spektral-Feature-Extraktion (custom/openl3/auto)
@@ -322,7 +363,8 @@ Top Feature Importances (Spektral):
 | `v27.1` | Memory Cue ML-Modelle (Slot 2-6), Konfidenz-Scoring, Phrase×ML Source |
 | `v27.2` | Spektral-Features: Mel-Spektrogramm-Analyse (7 Features x 32 Segmente = +224 dims) |
 | `v27.3` | Memory Cues: 32-Beat-Grid-Snapping, PSSI-Phrasen primaer, MIK entfernt |
-| `v28` | Memory Cue Logik komplett neu: Intro rueckwaerts von Hot A (max 3), Outro nur Kick (32/64-Regel), Phrasen >= 32b auf Raster, ML nur Validierung, Playlist-Cue-Reset-Tool |
+| `v28` | Memory Cue Logik komplett neu: Intro/Outro relativ zu Hot Cues, Kick-Outro-Erkennung |
+| `v28.1` | Phrasen direkt nutzen (kein 32-Raster-Snapping), 16-Beat-Phrasen, Spacing-Toleranz |
 
 ---
 
